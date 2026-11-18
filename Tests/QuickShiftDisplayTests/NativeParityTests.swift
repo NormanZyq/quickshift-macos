@@ -5,8 +5,10 @@ import Testing
 @testable import QuickShiftDisplay
 
 private func parityMonitor() -> GlobalShortcutMonitor {
-    GlobalShortcutMonitor(statusURL: FileManager.default.temporaryDirectory
+    let monitor = GlobalShortcutMonitor(statusURL: FileManager.default.temporaryDirectory
         .appendingPathComponent("QuickShift-parity-\(UUID().uuidString).state"))
+    monitor.foregroundProcessID = 123
+    return monitor
 }
 
 private func flags(_ modifiers: ShortcutModifiers) -> CGEventFlags {

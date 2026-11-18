@@ -1,7 +1,7 @@
 #define _DARWIN_C_SOURCE 1
 #include "InputSafety.h"
 #include <CoreFoundation/CoreFoundation.h>
-#include <errno.h>
+#include <dispatch/dispatch.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -18,34 +18,42 @@ _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2, "Input callback needs lock-free 64-b
 #define QSD_CALLBACK_BUDGET_NS UINT64_C(100000000)
 #define QSD_WORKER_BUDGET_NS UINT64_C(250000000)
 #define QSD_MAIN_BUDGET_NS UINT64_C(500000000)
+/* The tap can hold system input even if its thread never enters the callback.
+   Prove liveness before its 250 ms deadline, including when parked in Mach receive. */
+#define QSD_WORKER_PULSE_SECONDS 0.175
+#define QSD_RECHECK_NS UINT64_C(20000000)
 
 typedef struct {
     uint64_t magic;
     _Atomic int32_t pid;
     _Atomic uint32_t phase, fault, lastType;
     _Atomic uint64_t events, suppressed, actions, maximumNS;
-    _Atomic uint64_t callbackStarted, workerBeat, mainBeat;
+    uint64_t reserved[3]; /* Preserve the on-disk layout of earlier safety reports. */
 } QSDSharedStatus;
 
 struct QSDNativeInput {
     QSDSharedStatus *status;
     int statusFD, signalFDs[2];
     int32_t targetPID;
-    pthread_t worker, guardian;
+    pthread_t worker;
     pthread_mutex_t control;
-    pthread_cond_t readyCondition, guardCondition;
+    pthread_cond_t readyCondition;
     bool workerCreated, ready;
-    _Atomic bool stopping, armed, shutdown;
-    _Atomic uint64_t guardGeneration;
+    _Atomic bool stopping, armed;
+    _Atomic uint64_t callbackStarted, workerBeat;
+    dispatch_queue_t guardQueue;
+    dispatch_source_t watchdog;
     CFRunLoopRef workerLoop;
-    CFRunLoopTimerRef mainTimer;
     _Atomic uint32_t configVersion;
     _Atomic uint64_t leftBinding, rightBinding;
     _Atomic int32_t foregroundPID;
     _Atomic bool enabled, recording;
     _Atomic uint32_t head, tail;
     QSDNativeAction queue[QSD_QUEUE_CAPACITY];
-    /* Owned exclusively by the input run loop. */
+    _Atomic uint64_t queuedAt[QSD_QUEUE_CAPACITY];
+    /* Owned by the worker between arm and join. */
+    uint64_t scheduledCheck;
+    bool renewOnWait, checkTapEnabled;
     uint32_t capturedMouse;
     uint64_t capturedKeys[2];
 };
@@ -56,11 +64,6 @@ static bool qsd_expired(uint64_t now, uint64_t then, uint64_t budget) {
     return then != 0 && now > then && now - then > budget;
 }
 
-static void qsd_pause_ns(long nanoseconds) {
-    struct timespec delay = { .tv_sec = 0, .tv_nsec = nanoseconds };
-    while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
-}
-
 static void qsd_fault(QSDNativeInput *input, uint32_t reason) {
     atomic_store(&input->status->fault, reason);
     atomic_store(&input->status->phase, 3);
@@ -68,59 +71,99 @@ static void qsd_fault(QSDNativeInput *input, uint32_t reason) {
     if (atomic_load(&input->armed)) _exit((int)(70 + reason));
 }
 
-static void *qsd_guardian(void *context) {
-    QSDNativeInput *input = context;
-    for (;;) {
-        pthread_mutex_lock(&input->control);
-        while (!atomic_load(&input->armed) && !atomic_load(&input->shutdown)) {
-            pthread_cond_wait(&input->guardCondition, &input->control);
-        }
-        pthread_mutex_unlock(&input->control);
-        if (atomic_load(&input->shutdown)) return NULL;
-        uint64_t pendingMainSince = 0, observedGeneration = UINT64_MAX;
-        while (atomic_load(&input->armed) && !atomic_load(&input->shutdown)) {
-            uint64_t generation = atomic_load(&input->guardGeneration);
-            if (generation & 1) { qsd_pause_ns(20000000); continue; }
-            uint64_t now = qsd_now();
-            uint64_t callback = atomic_load(&input->status->callbackStarted);
-            uint64_t worker = atomic_load(&input->status->workerBeat);
-            uint64_t main = atomic_load(&input->status->mainBeat);
-            if (generation == atomic_load(&input->guardGeneration) && atomic_load(&input->armed)) {
-                if (qsd_expired(now, callback, QSD_CALLBACK_BUDGET_NS)) qsd_fault(input, 1);
-                if (qsd_expired(now, worker, QSD_WORKER_BUDGET_NS)) qsd_fault(input, 2);
-                /* AppKit can pause an idle main loop around display sleep/wake. The C
-                   callback still passes ordinary input independently. Only an action
-                   queue that stays undrained needs main-loop recovery. Measure the
-                   wait here so a new action after an idle pause gets a full budget. */
-                bool pending = atomic_load(&input->head) != atomic_load(&input->tail);
-                if (generation != observedGeneration || !pending) pendingMainSince = 0;
-                observedGeneration = generation;
-                if (pending && pendingMainSince == 0) pendingMainSince = now;
-                if (qsd_expired(now, main, QSD_MAIN_BUDGET_NS)
-                    && qsd_expired(now, pendingMainSince, QSD_MAIN_BUDGET_NS)) qsd_fault(input, 3);
-            }
-            qsd_pause_ns(20000000);
-        }
-    }
+/* A new action after a long idle period always gets its own full budget. Only
+   the producer publishes slots. The UI can retire a slot while it is inspected. */
+static uint64_t qsd_main_deadline(QSDNativeInput *input, uint64_t now) {
+    if (atomic_load(&input->stopping)) return UINT64_MAX;
+    uint32_t tail = atomic_load(&input->tail);
+    if (tail == atomic_load(&input->head)) return UINT64_MAX;
+    uint64_t deadline = atomic_load(&input->queuedAt[tail % QSD_QUEUE_CAPACITY]) + QSD_MAIN_BUDGET_NS;
+    if (tail != atomic_load(&input->tail)) return now + QSD_RECHECK_NS;
+    if (now >= deadline) qsd_fault(input, 3);
+    return deadline;
 }
 
-static void qsd_main_heartbeat(CFRunLoopTimerRef timer, void *context) {
-    (void)timer;
+static void qsd_guardian(void *context) {
     QSDNativeInput *input = context;
-    atomic_store(&input->status->mainBeat, qsd_now());
-}
-
-static void qsd_arm(QSDNativeInput *input) {
-    atomic_fetch_add(&input->guardGeneration, 1);
+    if (!atomic_load(&input->armed)) return;
     uint64_t now = qsd_now();
-    atomic_store(&input->status->callbackStarted, 0);
-    atomic_store(&input->status->mainBeat, now);
-    atomic_store(&input->status->workerBeat, now);
-    pthread_mutex_lock(&input->control);
+    if (qsd_expired(now, atomic_load(&input->callbackStarted), QSD_CALLBACK_BUDGET_NS)) qsd_fault(input, 1);
+    if (qsd_expired(now, atomic_load(&input->workerBeat), QSD_WORKER_BUDGET_NS)) qsd_fault(input, 2);
+    qsd_main_deadline(input, now);
+}
+
+/* Called by the worker outside the event callback. A healthy idle worker renews
+   the deadline before it fires. The independent queue only runs if evidence of
+   progress is overdue. While inside a run-loop turn a callback could start at
+   any point, so use the shorter first deadline and recheck until the next turn. */
+static void qsd_worker_progress(QSDNativeInput *input, bool waiting) {
+    uint64_t now = qsd_now();
+    atomic_store(&input->workerBeat, now);
+    uint64_t deadline = now + (waiting ? QSD_WORKER_BUDGET_NS : QSD_CALLBACK_BUDGET_NS);
+    uint64_t mainDeadline = qsd_main_deadline(input, now);
+    if (mainDeadline < deadline) deadline = mainDeadline;
+    /* Reuse an earlier alarm across a burst of ordinary keys or drag events.
+       Only the liveness pulse needs to push the parked deadline back. */
+    bool renew = waiting && input->renewOnWait;
+    if (renew) input->renewOnWait = false;
+    if (!renew && now < input->scheduledCheck && input->scheduledCheck <= deadline) return;
+    input->scheduledCheck = deadline;
+    int64_t delay = deadline > now ? (int64_t)(deadline - now) : 0;
+    dispatch_source_set_timer(input->watchdog, dispatch_time(DISPATCH_TIME_NOW, delay),
+                              QSD_RECHECK_NS, 0);
+}
+
+static void qsd_run_loop_activity(CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *context) {
+    (void)observer;
+    qsd_worker_progress(context, activity == kCFRunLoopBeforeWaiting);
+}
+
+typedef struct {
+    QSDNativeInput *input;
+    CFMachPortRef tap;
+} QSDPulseContext;
+
+static void qsd_worker_pulse(CFRunLoopTimerRef timer, void *context) {
+    (void)timer;
+    QSDPulseContext *pulse = context;
+    pulse->input->renewOnWait = true;
+    /* The run-loop observers report this turn even with no input arriving.
+       An invalidated tap must not be kept alive just by the liveness timer. */
+    if (!CFMachPortIsValid(pulse->tap) ||
+        (pulse->input->checkTapEnabled && !CGEventTapIsEnabled(pulse->tap))) {
+        CFRunLoopStop(CFRunLoopGetCurrent());
+    }
+    pulse->input->checkTapEnabled = false;
+}
+
+static bool qsd_arm(QSDNativeInput *input) {
+    input->guardQueue = dispatch_queue_create("local.quickshiftdisplay.input-safety",
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    if (!input->guardQueue) return false;
+    input->watchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, input->guardQueue);
+    if (!input->watchdog) {
+        dispatch_release(input->guardQueue);
+        return false;
+    }
+    dispatch_set_context(input->watchdog, input);
+    dispatch_source_set_event_handler_f(input->watchdog, qsd_guardian);
+    dispatch_activate(input->watchdog);
+    input->scheduledCheck = 0;
+    input->renewOnWait = true;
+    atomic_store(&input->callbackStarted, 0);
     atomic_store(&input->armed, true);
-    atomic_fetch_add(&input->guardGeneration, 1);
-    pthread_cond_signal(&input->guardCondition);
-    pthread_mutex_unlock(&input->control);
+    qsd_worker_progress(input, false);
+    return true;
+}
+
+static void qsd_disarm(QSDNativeInput *input) {
+    if (!input->watchdog) return;
+    dispatch_source_cancel(input->watchdog);
+    /* Let an already executing check finish before reusing or freeing input. */
+    dispatch_sync(input->guardQueue, ^{ atomic_store(&input->armed, false); });
+    dispatch_release(input->watchdog);
+    dispatch_release(input->guardQueue);
+    input->watchdog = NULL;
 }
 
 static uint64_t qsd_binding(QSDNativeShortcut value) {
@@ -144,11 +187,13 @@ static bool qsd_matches(uint64_t binding, uint8_t kind, uint16_t code, uint8_t m
 }
 
 static bool qsd_enqueue(QSDNativeInput *input, int32_t direction) {
+    int32_t pid = input->targetPID == 0 ? atomic_load(&input->foregroundPID) : input->targetPID;
+    if (pid <= 0) return false;
     uint32_t head = atomic_load_explicit(&input->head, memory_order_relaxed);
     uint32_t tail = atomic_load_explicit(&input->tail, memory_order_acquire);
     if (head - tail >= QSD_QUEUE_CAPACITY) { qsd_fault(input, 5); return false; }
-    input->queue[head % QSD_QUEUE_CAPACITY] = (QSDNativeAction){direction,
-        input->targetPID > 0 ? input->targetPID : atomic_load(&input->foregroundPID)};
+    input->queue[head % QSD_QUEUE_CAPACITY] = (QSDNativeAction){direction, pid};
+    atomic_store(&input->queuedAt[head % QSD_QUEUE_CAPACITY], qsd_now());
     atomic_store_explicit(&input->head, head + 1, memory_order_release);
     atomic_fetch_add(&input->status->actions, 1);
     const unsigned char signal = 1;
@@ -160,6 +205,9 @@ static CGEventRef qsd_route(QSDNativeInput *input, CGEventType type, CGEventRef 
     if (atomic_load(&input->stopping) || atomic_load(&input->status->fault)) return event;
     if (type == kCGEventTapDisabledByTimeout) { qsd_fault(input, 4); return event; }
     if (type == kCGEventTapDisabledByUserInput) {
+        // A queued notification can arrive even when the tap is already enabled.
+        // Check the actual tap once on the worker, outside the input callback.
+        input->checkTapEnabled = true;
         input->capturedMouse = 0;
         input->capturedKeys[0] = input->capturedKeys[1] = 0;
         return event;
@@ -168,7 +216,6 @@ static CGEventRef qsd_route(QSDNativeInput *input, CGEventType type, CGEventRef 
     uint16_t code;
     uint8_t kind;
     bool down = false, up = false, repeated = false;
-    uint8_t modifiers = qsd_modifiers(CGEventGetFlags(event));
     switch (type) {
         case kCGEventLeftMouseDown: down = true; code = 0; kind = 0; break;
         case kCGEventLeftMouseUp: up = true; code = 0; kind = 0; break;
@@ -190,7 +237,7 @@ static CGEventRef qsd_route(QSDNativeInput *input, CGEventType type, CGEventRef 
             down = type == kCGEventKeyDown; up = !down;
             repeated = down && CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) != 0;
             /* System Force Quit is unconditionally reserved. */
-            if (code == 53 && (modifiers & 10) == 10) {
+            if (code == 53 && (qsd_modifiers(CGEventGetFlags(event)) & 10) == 10) {
                 input->capturedKeys[0] &= ~(UINT64_C(1) << 53);
                 return event;
             }
@@ -215,6 +262,7 @@ static CGEventRef qsd_route(QSDNativeInput *input, CGEventType type, CGEventRef 
     uint64_t left = atomic_load(&input->leftBinding), right = atomic_load(&input->rightBinding);
     if (version != atomic_load_explicit(&input->configVersion, memory_order_acquire)
         || !enabled || recording) return event;
+    uint8_t modifiers = qsd_modifiers(CGEventGetFlags(event));
     int32_t direction = qsd_matches(left, kind, code, modifiers) ? 0
         : (qsd_matches(right, kind, code, modifiers) ? 1 : -1);
     if (direction < 0 || !qsd_enqueue(input, direction)) return event;
@@ -227,14 +275,14 @@ static CGEventRef qsd_callback(CGEventTapProxy proxy, CGEventType type, CGEventR
     (void)proxy;
     QSDNativeInput *input = context;
     uint64_t started = qsd_now();
-    atomic_store(&input->status->callbackStarted, started);
+    atomic_store(&input->callbackStarted, started);
     atomic_store(&input->status->lastType, type);
     atomic_fetch_add(&input->status->events, 1);
     CGEventRef result = qsd_route(input, type, event);
     if (!result) atomic_fetch_add(&input->status->suppressed, 1);
     uint64_t elapsed = qsd_now() - started;
     if (elapsed > atomic_load(&input->status->maximumNS)) atomic_store(&input->status->maximumNS, elapsed);
-    atomic_store(&input->status->callbackStarted, 0);
+    atomic_store(&input->callbackStarted, 0);
     return result;
 }
 
@@ -245,63 +293,97 @@ static void *qsd_worker(void *context) {
         | CGEventMaskBit(kCGEventRightMouseUp) | CGEventMaskBit(kCGEventRightMouseDragged)
         | CGEventMaskBit(kCGEventOtherMouseDown) | CGEventMaskBit(kCGEventOtherMouseUp)
         | CGEventMaskBit(kCGEventOtherMouseDragged) | CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
-    atomic_store(&input->status->workerBeat, qsd_now());
     CFMachPortRef tap = input->targetPID > 0
         ? CGEventTapCreateForPid(input->targetPID, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, qsd_callback, input)
         : CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, qsd_callback, input);
     CFRunLoopSourceRef source = tap ? CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) : NULL;
     CFRunLoopRef loop = CFRunLoopGetCurrent();
-    if (source) CFRunLoopAddSource(loop, source, kCFRunLoopDefaultMode);
+    CFRunLoopObserverContext observerContext = {0, input, NULL, NULL, NULL};
+    CFRunLoopObserverRef observer = CFRunLoopObserverCreate(NULL, kCFRunLoopBeforeWaiting | kCFRunLoopAfterWaiting,
+                                                            true, 0, qsd_run_loop_activity, &observerContext);
+    QSDPulseContext pulseContext = {input, tap};
+    CFRunLoopTimerContext timerContext = {0, &pulseContext, NULL, NULL, NULL};
+    CFRunLoopTimerRef pulse = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + QSD_WORKER_PULSE_SECONDS,
+        QSD_WORKER_PULSE_SECONDS, 0, 0, qsd_worker_pulse, &timerContext);
+    bool installed = source && observer && pulse;
+    if (installed) {
+        CFRunLoopAddObserver(loop, observer, kCFRunLoopDefaultMode);
+        CFRunLoopAddTimer(loop, pulse, kCFRunLoopDefaultMode);
+        CFRunLoopAddSource(loop, source, kCFRunLoopDefaultMode);
+    }
     pthread_mutex_lock(&input->control);
     CFRetain(loop);
     input->workerLoop = loop;
-    atomic_store(&input->status->phase, source ? 1 : 2);
+    atomic_store(&input->status->phase, installed ? 1 : 2);
     input->ready = true;
     pthread_cond_signal(&input->readyCondition);
     pthread_mutex_unlock(&input->control);
-    while (source && !atomic_load(&input->stopping)) {
-        atomic_store(&input->status->workerBeat, qsd_now());
-        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false) == kCFRunLoopRunFinished) break;
-    }
+    if (installed && !atomic_load(&input->stopping)) CFRunLoopRun();
+    qsd_worker_progress(input, false);
     if (tap) { CGEventTapEnable(tap, false); CFMachPortInvalidate(tap); }
-    if (source) { CFRunLoopRemoveSource(loop, source, kCFRunLoopDefaultMode); CFRelease(source); }
+    if (installed) {
+        CFRunLoopRemoveSource(loop, source, kCFRunLoopDefaultMode);
+        CFRunLoopRemoveTimer(loop, pulse, kCFRunLoopDefaultMode);
+        CFRunLoopRemoveObserver(loop, observer, kCFRunLoopDefaultMode);
+    }
+    if (pulse) CFRelease(pulse);
+    if (observer) CFRelease(observer);
+    if (source) CFRelease(source);
     if (tap) CFRelease(tap);
     pthread_mutex_lock(&input->control);
     CFRelease(input->workerLoop);
     input->workerLoop = NULL;
     pthread_mutex_unlock(&input->control);
-    atomic_store(&input->armed, false);
-    atomic_fetch_add(&input->guardGeneration, 2);
-    if (atomic_load(&input->status->phase) == 1) atomic_store(&input->status->phase, 0);
+    qsd_disarm(input);
+    if (atomic_load(&input->status->phase) == 1) {
+        atomic_store(&input->status->phase, 0);
+        if (!atomic_load(&input->stopping)) {
+            const unsigned char signal = 1;
+            (void)write(input->signalFDs[1], &signal, 1);
+        }
+    }
     return NULL;
 }
 
 QSDNativeInput *QSDNativeInputCreate(const char *path, int32_t targetPID) {
     QSDNativeInput *input = calloc(1, sizeof(*input));
     if (!input) return NULL;
-    input->statusFD = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    // Only the owner may reset diagnostics or install a listener against this state.
+    input->statusFD = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_EXLOCK | O_NONBLOCK, 0600);
     if (input->statusFD < 0) { free(input); return NULL; }
-    if (ftruncate(input->statusFD, sizeof(QSDSharedStatus)) != 0) { close(input->statusFD); free(input); return NULL; }
+    if (pipe(input->signalFDs) != 0) goto fail_file;
+    for (int i = 0; i < 2; ++i) {
+        int flags = fcntl(input->signalFDs[i], F_GETFL);
+        if (flags < 0 || fcntl(input->signalFDs[i], F_SETFL, flags | O_NONBLOCK) < 0 ||
+            fcntl(input->signalFDs[i], F_SETFD, FD_CLOEXEC) < 0) goto fail_pipe;
+    }
+    if (fcntl(input->signalFDs[1], F_SETNOSIGPIPE, 1) < 0) goto fail_pipe;
+    if (pthread_mutex_init(&input->control, NULL) != 0) goto fail_pipe;
+    if (pthread_cond_init(&input->readyCondition, NULL) != 0) goto fail_mutex;
+    if (ftruncate(input->statusFD, sizeof(QSDSharedStatus)) != 0) goto fail_condition;
     input->status = mmap(NULL, sizeof(QSDSharedStatus), PROT_READ | PROT_WRITE, MAP_SHARED, input->statusFD, 0);
-    if (input->status == MAP_FAILED) { close(input->statusFD); free(input); return NULL; }
+    if (input->status == MAP_FAILED) goto fail_condition;
     memset(input->status, 0, sizeof(QSDSharedStatus));
     input->status->magic = QSD_MAGIC;
     atomic_store(&input->status->pid, getpid());
     input->targetPID = targetPID;
-    if (pipe(input->signalFDs) != 0) { munmap(input->status, sizeof(QSDSharedStatus)); close(input->statusFD); free(input); return NULL; }
-    for (int i = 0; i < 2; ++i) {
-        fcntl(input->signalFDs[i], F_SETFL, fcntl(input->signalFDs[i], F_GETFL) | O_NONBLOCK);
-        fcntl(input->signalFDs[i], F_SETFD, FD_CLOEXEC);
-    }
-    fcntl(input->signalFDs[1], F_SETNOSIGPIPE, 1);
-    pthread_mutex_init(&input->control, NULL);
-    pthread_cond_init(&input->readyCondition, NULL);
-    pthread_cond_init(&input->guardCondition, NULL);
-    if (pthread_create(&input->guardian, NULL, qsd_guardian, input) != 0) {
-        close(input->signalFDs[0]); close(input->signalFDs[1]);
-        munmap(input->status, sizeof(QSDSharedStatus)); close(input->statusFD); free(input); return NULL;
-    }
     return input;
+
+fail_condition:
+    pthread_cond_destroy(&input->readyCondition);
+fail_mutex:
+    pthread_mutex_destroy(&input->control);
+fail_pipe:
+    close(input->signalFDs[0]);
+    close(input->signalFDs[1]);
+fail_file:
+    close(input->statusFD);
+    free(input);
+    return NULL;
+}
+
+void QSDNativeInputSetForegroundPID(QSDNativeInput *input, int32_t pid) {
+    atomic_store(&input->foregroundPID, pid);
 }
 
 void QSDNativeInputConfigure(QSDNativeInput *input, QSDNativeConfiguration value) {
@@ -318,14 +400,9 @@ bool QSDNativeInputStart(QSDNativeInput *input) {
     if (input->workerCreated || input->targetPID < 0 || atomic_load(&input->status->fault)) return false;
     atomic_store(&input->stopping, false);
     input->ready = false;
-    CFRunLoopTimerContext timerContext = {0, input, NULL, NULL, NULL};
-    input->mainTimer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 0.05, 0.05, 0, 0, qsd_main_heartbeat, &timerContext);
-    if (!input->mainTimer) return false;
-    CFRunLoopAddTimer(CFRunLoopGetMain(), input->mainTimer, kCFRunLoopCommonModes);
-    qsd_arm(input);
+    if (!qsd_arm(input)) return false;
     if (pthread_create(&input->worker, NULL, qsd_worker, input) != 0) {
-        atomic_store(&input->armed, false);
-        CFRunLoopTimerInvalidate(input->mainTimer); CFRelease(input->mainTimer); input->mainTimer = NULL;
+        qsd_disarm(input);
         return false;
     }
     input->workerCreated = true;
@@ -342,11 +419,16 @@ void QSDNativeInputStop(QSDNativeInput *input) {
     CFRunLoopRef loop = input->workerLoop;
     if (loop) CFRetain(loop);
     pthread_mutex_unlock(&input->control);
-    if (loop) { CFRunLoopWakeUp(loop); CFRelease(loop); }
+    if (loop) {
+        /* Also handles stop arriving just before the worker enters its run loop. */
+        CFRunLoopPerformBlock(loop, kCFRunLoopDefaultMode, ^{ CFRunLoopStop(CFRunLoopGetCurrent()); });
+        CFRunLoopWakeUp(loop);
+        CFRelease(loop);
+    }
     if (input->workerCreated) { pthread_join(input->worker, NULL); input->workerCreated = false; }
-    atomic_store(&input->armed, false);
-    atomic_fetch_add(&input->guardGeneration, 2);
-    if (input->mainTimer) { CFRunLoopTimerInvalidate(input->mainTimer); CFRelease(input->mainTimer); input->mainTimer = NULL; }
+    qsd_disarm(input);
+    input->checkTapEnabled = false;
+    input->capturedMouse = 0; input->capturedKeys[0] = input->capturedKeys[1] = 0;
     atomic_store(&input->tail, atomic_load(&input->head));
     QSDNativeInputDrainSignal(input);
     if (!atomic_load(&input->status->fault)) atomic_store(&input->status->phase, 0);
@@ -355,14 +437,9 @@ void QSDNativeInputStop(QSDNativeInput *input) {
 void QSDNativeInputDestroy(QSDNativeInput *input) {
     if (!input) return;
     QSDNativeInputStop(input);
-    pthread_mutex_lock(&input->control);
-    atomic_store(&input->shutdown, true);
-    pthread_cond_signal(&input->guardCondition);
-    pthread_mutex_unlock(&input->control);
-    pthread_join(input->guardian, NULL);
     close(input->signalFDs[0]); close(input->signalFDs[1]);
     munmap(input->status, sizeof(QSDSharedStatus)); close(input->statusFD);
-    pthread_cond_destroy(&input->readyCondition); pthread_cond_destroy(&input->guardCondition);
+    pthread_cond_destroy(&input->readyCondition);
     pthread_mutex_destroy(&input->control);
     free(input);
 }

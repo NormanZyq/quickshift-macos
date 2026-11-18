@@ -35,3 +35,21 @@ private func createStatus(at url: URL, withFault: Bool) throws {
     #expect(!GlobalShortcutMonitor.preservePreviousFault(at: url))
     #expect(GlobalShortcutMonitor.readStatus(at: GlobalShortcutMonitor.previousFaultURL(for: url))?.fault == 4)
 }
+
+@Test func secondListenerCannotEraseTheOwnersSafetyState() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("QuickShift-owner-\(UUID()).state")
+    defer { try? FileManager.default.removeItem(at: url) }
+    do {
+        let owner = try #require(url.path.withCString { QSDNativeInputCreate($0, 0) })
+        defer { QSDNativeInputDestroy(owner) }
+        _ = QSDNativeInputRouteForTesting(owner, .tapDisabledByTimeout, nil)
+        let duplicate = url.path.withCString { QSDNativeInputCreate($0, 0) }
+        defer { if let duplicate { QSDNativeInputDestroy(duplicate) } }
+        #expect(duplicate == nil)
+        #expect(GlobalShortcutMonitor.readStatus(at: url)?.fault == 4)
+        #expect(QSDNativeInputFault(owner) == 4)
+    }
+    let replacement = try #require(url.path.withCString { QSDNativeInputCreate($0, 0) })
+    defer { QSDNativeInputDestroy(replacement) }
+    #expect(QSDNativeInputFault(replacement) == 0)
+}

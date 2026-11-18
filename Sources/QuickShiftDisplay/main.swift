@@ -8,7 +8,7 @@ if CommandLine.arguments.contains("--diagnostics") {
          "visibleFrame": NSStringFromRect(display.visibleFrame)]
     }
     var report: [String: Any] = [
-        "version": "1.1.1",
+        "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
         "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
         "diagnosticProcessAccessibilityTrusted": AXIsProcessTrusted(),
         "displays": displays,

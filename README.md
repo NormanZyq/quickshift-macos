@@ -1,127 +1,218 @@
+<!-- HEADER_ICON_START -->
+
+<!-- HEADER_ICON_END -->
+
 # QuickShift
 
-一个用 Swift + AppKit 编写界面、用原生 C 处理输入的 macOS 菜单栏工具：通过组合键，把当前激活应用的窗口移动到另一台显示器。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-**当前源码为 1.1.1 测试构建。** 1.0 系列的实机测试出现过输入阻塞，旧进程已停止、旧授权已撤销。1.1.0 已更换输入实现并加入独立看门狗；用户重新以全局模式启动后，三屏移动和系统输入正常，已核对到 21 次快捷键触发、42 个按下／松开事件被拦截，故障计数为 0。隔离测试进程曾在显示器唤醒阶段因主循环心跳延迟退出；1.1.1 针对这一退出条件增加了修复和回归测试。
+<!-- TOOL_PHILOSOPHY_START -->
 
-1.1.1 已替换到 `dist/QuickShift.app`，辅助功能授权已刷新，当前全局监听已启用。用户已确认实体鼠标移屏往返及普通输入正常；本轮核对到 16 次触发、32 个按下／松开事件被拦截，故障计数为 0，最长回调约 59 微秒。首次启动和输入引擎更新后均保持暂停。
+<!-- TOOL_PHILOSOPHY_END -->
 
-## 使用
+<!-- SHORTCUT_PHILOSOPHY_START -->
 
-1. 打开 `dist/QuickShift.app`。也可以先将它复制到「应用程序」文件夹，再打开。
-2. 在设置窗口点击「打开辅助功能设置…」，在系统设置 → 隐私与安全性 → 辅助功能中启用 **QuickShift**。这是 macOS 移动其他应用窗口所要求的权限，需要用户手动授权。
-3. 在设置中勾选「启用全局快捷键」。首次启动和更新输入引擎后，会先保持暂停，供你主动开启。
-4. 激活任意普通应用窗口，按住 **Control + Command + Shift**：
-   - 点击鼠标左键：移到左侧显示器。
-   - 点击鼠标右键：移到右侧显示器。
-5. 默认开启循环，最左侧再向左会到最右侧，反方向同理。点击菜单栏的双显示器图标 →「设置…」，可关闭循环或更改组合键。
+<!-- SHORTCUT_PHILOSOPHY_END -->
 
-关闭设置窗口后，工具仍在菜单栏运行。可从菜单栏暂停快捷键或退出。
+A native macOS menu bar utility for moving the active window between displays.
 
-### 输入恢复保护
+[For users](#for-users) · [For developers](#for-developers) · [Troubleshooting](#troubleshooting)
 
-- 输入回调完全在原生 C 中运行，不进入 Swift 或 AppKit。它只读取事件字段和原子配置，通过固定大小的队列及非阻塞通知交付动作，窗口移动在另一条串行队列执行。
-- 独立 POSIX 看门狗观察回调、事件循环和移屏任务交付；设计阈值分别为 100、250、500 毫秒。主循环检查只针对持续未交付的移屏任务，闲置时界面线程的延迟不会单独触发退出。停顿时直接结束本工具进程，使系统销毁它的过滤器，不依赖故障线程执行清理。实际退出延迟受系统调度影响。
-- 系统响应超时和动作队列溢出也会结束本工具；下次启动保持暂停。普通临时停用通知不被误判为故障，也不会被工具主动覆盖。
-- 暂停快捷键会移除全局监听；强制退出或异常退出后，下次启动也会先暂停，需手动重新启用。
-- `⌘⌥Esc` 始终保留给系统强制退出，不能设为移屏快捷键。
-- 可以在未运行应用时用下面的命令安全启动设置界面，保持监听关闭：
+## For users
+
+### Features
+
+- Move the active window to the display on its left or right, wherever the pointer is.
+- Customize each direction with a modifier + mouse button or keyboard shortcut.
+- Enable wraparound to cycle through displays, or stop at the edges.
+- Keep a window's size and relative position where possible, with adjustments for smaller displays.
+- Pause shortcuts, change settings, and quit from the menu bar.
+- Restore your shortcut enablement choice on restart, with optional launch at login.
+
+### Installation
+
+Requires **macOS 13 or later** and at least **two displays in extended desktop mode**. Mirrored displays share a workspace and do not provide separate destinations.
+
+- **Packaged app:** extract the archive and move `QuickShift.app` to your Applications folder.
+- **From source:** [build the app](#build-from-source), then move `dist/QuickShift.app` to your Applications folder.
+
+Open QuickShift from its installed location before granting permissions.
+
+### Quick start
+
+1. In QuickShift, click **Open Accessibility Settings…** (`打开辅助功能设置…`) and enable QuickShift in macOS System Settings.
+2. Enable **Global Shortcuts** (`启用全局快捷键`) in QuickShift settings.
+3. Focus a regular app window and use the shortcuts below.
+
+The app's controls currently use Chinese labels; the corresponding labels are included here where needed.
+
+### Default shortcuts
+
+| Action | Shortcut |
+| --- | --- |
+| Move to the left display | Control + Command + Shift + left mouse click |
+| Move to the right display | Control + Command + Shift + right mouse click |
+
+The shortcut moves the **active window**. Matching clicks are captured to preserve the current app's focus and prevent context menus.
+
+**Wraparound is enabled by default:** moving left from the leftmost display goes to the rightmost display, and vice versa.
+
+### Customize shortcuts and behavior
+
+Open the menu bar icon → **Settings…** (`设置…`).
+
+1. Click the shortcut for the direction you want to change.
+2. Hold one or more modifiers—Control, Option, Shift, or Command—and press a key, or click a mouse button inside the recording area.
+3. Click **Save** (`保存`).
+
+Each direction needs a different shortcut. Modifier matching is exact: an extra Option key, for example, will not trigger the default shortcut. Caps Lock, Fn, and numeric keypad flags do not affect matching. Keyboard shortcuts follow physical key positions.
+
+Turn **Wraparound** (`循环切换显示器`) off to stop at either edge. Preferences are saved automatically. With Accessibility permission granted, an enabled shortcut switch resumes listening on the next normal launch; a disabled switch stays disabled. Closing the settings window keeps QuickShift running in the menu bar; use its **Quit** command to exit.
+
+### Launch at login
+
+Enable **Launch at Login** (`登录时启动`) in settings to open QuickShift when you sign in to macOS. Disable it to remove the login item. This option is off by default and is independent of the global shortcuts switch.
+
+If macOS requires approval, click **Open Login Items Settings…** (`打开登录项设置…`) and allow QuickShift. The app reflects the status managed by macOS, including changes made in System Settings.
+
+### Window behavior
+
+- Displays are ordered from left to right using their positions in macOS. Displays with the same horizontal center are ordered from top to bottom.
+- For a window spanning multiple displays, the display with the largest overlap is its starting display.
+- Window size and relative position are preserved where possible. Resizable windows can shrink to fit the destination's available desktop area, respecting the menu bar and Dock.
+- Display connections and arrangement changes are picked up automatically.
+- Native macOS full-screen windows must leave full screen before moving. QuickShift works with desktop windows and does not switch Spaces.
+
+### Permissions and privacy
+
+QuickShift uses **Accessibility** permission to control windows. It does not require Screen Recording permission, send network requests, or log the contents of your keystrokes. Preferences are stored locally.
+
+Disabling shortcuts removes the global input listener. New installations start with shortcuts disabled; subsequent launches restore your saved choice. A diagnostic or protective pause keeps that choice intact; use **Restart Listener** (`重新启动监听`) to resume. Command + Option + Esc remains reserved for the system's Force Quit command.
+
+## For developers
+
+### Build from source
+
+Use Xcode or Command Line Tools with **Swift 6**. The project is a Swift package with no third-party dependencies; open `Package.swift` in Xcode or build from the repository root:
 
 ```bash
+bash scripts/build-app.sh
 open dist/QuickShift.app --args --paused
 ```
 
-### 自定义快捷键
+The script builds a release app for the current Mac's architecture, bundles its resources, signs it, and writes `dist/QuickShift.app`.
 
-点击设置中的左／右快捷键按钮，在录制面板中按下新的键盘组合键，或按住修饰键、在蓝色区域点击鼠标，然后点击「保存」。支持 Control、Option、Shift、Command 的组合，以及左键、右键、中键、其他鼠标按钮和普通键盘按键。至少需要一个修饰键；左右方向不能绑定同一组合键。录制期间暂时停止执行全局快捷键。
+Quit an existing QuickShift instance from its menu before rebuilding the same app path. Closing its settings window does not quit the process.
 
-组合键精确匹配修饰键，例如额外按住 Option 不会触发默认组合键。Caps Lock、Fn 和数字键盘标志不参与匹配。键盘绑定按物理键位保存；更换键盘布局后，显示的字符仍是录制时的字符。系统保留快捷键或其他工具提前截获的组合键可能无法使用。
+### Build options and signing
 
-### 移动规则
-
-- 操作的是**按下组合键时前台应用的活动窗口**。鼠标可停在任意位置，命中的点击不会传给下面的应用，也不会触发右键菜单。
-- 根据系统设置中的显示器位置，按水平中心从左到右排列；水平中心相同时从上到下排列。窗口跨屏时，以覆盖面积最大的显示器为起点。
-- 保留普通窗口的尺寸（逻辑点）及相对位置；目标屏幕较小时，尽量缩小到其可用区域。铺满窗口跨不同尺寸屏幕时会尝试适配目标可用区域；当前隔离测试发现，竖屏移到横屏后能缩小高度，但未扩展到目标屏幕的全部宽度，完整铺满行为尚未通过验收。
-- 避开菜单栏、Dock 和刘海占用的区域。不支持缩放的窗口保留尺寸，并尽量让标题栏可见。
-- 插拔显示器或更改排列后立即重新读取，不需要重启。镜像显示不等于独立扩展屏幕。
-- 关闭循环后，到达排列边缘会停止。只有一台显示器时会显示提示。
-
-## 从源码构建
-
-需要 macOS 13 或以上、带 Swift 6 的 Xcode / Command Line Tools，无第三方依赖。源码可以用 Xcode 打开 `Package.swift`。
-
-```bash
-cd /path/to/quick-shift-display
-bash scripts/build-app.sh
-open dist/QuickShift.app
-```
-
-脚本会进行 release 编译、生成原生绘制的图标、在临时目录组装并签名完整 `.app`，校验后替换旧应用，避免原地覆盖可执行文件引起系统签名缓存不一致。默认构建当前 Mac 架构；构建 Intel + Apple Silicon 通用版本：
+Build a universal app for Apple Silicon and Intel:
 
 ```bash
 bash scripts/build-app.sh --arch arm64 --arch x86_64
 ```
 
-如有正式签名证书，可传入签名身份：
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `CONFIGURATION` | `release` | Swift build configuration, such as `debug` or `release`. |
+| `QUICKSHIFT_APP_PATH` | `<repository>/dist/QuickShift.app` | Output app location; use an absolute path for a custom location. |
+| `SIGNING_IDENTITY` | `quickshift.signingIdentity` from Git config, then `-` | Override the signing identity for one build. |
+| `QUICKSHIFT_ALLOW_IDENTITY_CHANGE` | `0` | Set to `1` for an intentional replacement with an incompatible identity. |
+
+#### Keep Accessibility access across updates
+
+For personal use, create an **Apple Development** certificate in Xcode Settings → Accounts → Manage Certificates. For direct distribution, use **Developer ID Application** from your Apple Developer Program team. Choose the signing channel you intend to keep. Copy the exact identity name from the first command and save it once in this checkout.
 
 ```bash
-SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' bash scripts/build-app.sh
+security find-identity -v -p codesigning
+git config --local quickshift.signingIdentity 'Apple Development: Your Name (ID)'
+bash scripts/build-app.sh
 ```
 
-当前交付为本机运行版本，没有提交 Apple 公证。重新构建或移动应用后，如果系统不再认可旧权限，请在「辅助功能」列表中移除旧条目，再添加并授权新位置的 `QuickShift.app`。重新构建前先从 QuickShift 自己的菜单退出后台进程；关闭设置窗口会继续驻留。构建脚本会在检测到该进程时停止，避免新旧版本同时混淆。
+macOS records Accessibility consent against the app's code identity. For normal updates, keep the bundle identifier, signing identity and installation path consistent. The build checks both versions against each other's designated requirements before replacing the previous app. An incompatible build stops with the original intact. To build alongside it, use `QUICKSHIFT_APP_PATH="$PWD/dist/preview/QuickShift.app" bash scripts/build-app.sh`. [Apple on code identity and privacy grants](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
 
-## 验证和诊断
+An existing ad hoc grant is tied to that build's code hash. When migrating an installed ad hoc copy to your configured certificate, quit QuickShift, run `QUICKSHIFT_ALLOW_IDENTITY_CHANGE=1 bash scripts/build-app.sh`, and grant Accessibility to the new copy once. Subsequent builds use the saved identity. Developer ID builds use the hardened runtime and a secure timestamp. Public distribution also requires a separate notarization step for the standard Gatekeeper experience. [Apple's notarization guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 
-1.0 系列两轮实机测试出现了输入阻塞，不能作为可用版本。当前 1.1.1 已通过 28 项 Swift 测试和 7 项独立看门狗测试。新增回归覆盖闲置期间主循环延迟、恢复后新任务正常交付，以及上次保护性退出原因在重新启动后的保留。真正的回调停顿、事件循环停顿，以及有任务积压的主循环停顿仍分别触发保护。
+### Tests
 
-1.1.0 测试进程范围内的实机自动操作已确认：默认左右三次循环移屏、关闭循环后双侧边缘停止、普通输入透传、键盘及鼠标组合键录制、旧绑定失效和重启后设置保存；触发时的输入被拦截，观察到的最长回调约 20 微秒，故障计数为 0。用户重新启动后的全局模式记录到 21 次触发，最长回调 77 微秒，系统输入正常。1.1.1 更新后，实体鼠标全局移屏复核通过，记录到 16 次触发、32 个事件被拦截，测试窗口的输入计数保持不变，故障计数为 0。铺满窗口的适配限制见上文；长时间睡眠唤醒的真实环境验证仍待完成。看门狗测试不创建事件过滤器、不发送系统输入，在独立子进程中模拟停顿并检查退出原因与耗时。
+Run the Swift suite and the native watchdog checks from the repository root. The watchdog checks also require Python 3.
 
 ```bash
-CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache" \
-SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache" \
-swift test --disable-sandbox --cache-path .build/cache
-
+swift test
 python3 scripts/test-watchdog.py
-
-dist/QuickShift.app/Contents/MacOS/QuickShiftDisplay --diagnostics
+bash scripts/test-signing.sh
 ```
 
-自动化测试覆盖双向循环与停止、乱序／负坐标／上下排列的显示器、跨屏窗口、坐标转换、窗口适配、快捷键冲突和序列化，以及输入按下／拖动／松开完整拦截与键盘自动重复。
+The suites cover display navigation and placement, shortcut validation and persistence, startup preferences, local and external window routing, login item state, input matching and release handling, and watchdog recovery. Swift tests use in-memory events and simulated login services; watchdog checks use isolated subprocesses. Neither installs an event tap or posts system input.
 
-回归测试只创建内存中的事件，不安装事件过滤器、不发送系统输入；测试在主线程阻塞时，原生匹配器仍能及时返回，再异步处理移动请求，并保留触发时的前台进程快照。另有原生 C 匹配器与 Swift 参考状态机的对照测试。
+Run `python3 scripts/test-watchdog.py --idle-cost` to measure the idle input engine for 30 seconds. The probe uses a private Mach port and reports CPU percentage, thread count, and context switches per second.
 
-实际多屏验收：打开一个普通窗口，测试默认左右点击、边缘循环、关闭循环、不同分辨率屏幕、修改快捷键、退出重开后的设置保存，以及鼠标停在其他应用上时是否仍移动原活动窗口。
+The signing checks build disposable copies and verify compatible replacements, refusal of incompatible updates or missing certificates, and protection of a running executable.
 
-仓库还提供一个独立进程的原生测试窗口，会实时显示所在屏幕、窗口坐标和大小，以及实际收到的鼠标／键盘事件数，便于检查是否正确拦截输入。它不需要额外权限，也不操作用户文档：
+### Development test window
+
+Build and open the disposable window used for cross-process window movement checks:
 
 ```bash
+mkdir -p .build
 bash scripts/build-window-probe.sh
 open .build/QuickShiftProbe.app
 ```
 
-在测试窗口的蓝色区域触发移屏组合键；窗口应切换屏幕，输入事件数应保持不变。「铺满当前屏幕」和「恢复普通尺寸」可用于检查跨不同尺寸屏幕的窗口适配。
+The window displays its screen, coordinates, dimensions, and received input count. Its state is written to `.build/probe-state.json`. A consumed shortcut should move the window without increasing that count.
 
-测试窗口把自己的屏幕路径、坐标、尺寸及输入事件计数写入 `.build/probe-state.json`，不记录按键内容。移动动画和显示器重新连接期间，路径可能包含中间位置；验收时以移动结束后的坐标及屏幕为准。开发时可先从 QuickShift 菜单退出，再以该文件中的 `processID` 启动隔离模式：
+To limit the listener to this test process, quit QuickShift, then replace `12345` with the `processID` from the state file:
 
 ```bash
 open dist/QuickShift.app --args --test-target-pid 12345 --paused
 ```
 
-该参数只接受本项目的 QuickShiftProbe 进程；无效目标不会退回全局模式。过滤器只针对该测试进程，窗口标题显示「隔离测试」。测试范围改变时会强制暂停，需要主动开启。
+Enable shortcuts in the app to begin. This mode accepts only the QuickShiftProbe process; an invalid target never falls back to global listening. With a physical mouse, follow the test window after each move so subsequent clicks still reach it. Normal global mode does not have this pointer restriction.
 
-隔离模式用实体鼠标测试时，每次移动后需把指针移到新的测试窗口。若把指针留在原位置，后续点击落到其他进程，便不会触发隔离监听。这一限制不适用于正常全局模式；全局模式的目标是鼠标停在任意位置都能移动当前活动窗口。
+### Project layout
 
-`--diagnostics` 还会显示原生模块运行计数、最长回调耗时和故障代码。代码 1–5 分别为回调停顿、事件循环停顿、移屏任务未交付、系统超时通知及动作队列溢出；不包含按键内容。重启后会保留上次故障状态到 `input-safety.state.previous-fault`，诊断输出中的 `previousSafetyExit` 给出故障类型和进程 ID。命令行进程的辅助功能权限以 `diagnosticProcessAccessibilityTrusted` 单独标示，它不代表菜单栏进程的权限状态。
+| Path | Responsibility |
+| --- | --- |
+| [`Sources/QuickShiftCore`](Sources/QuickShiftCore) | Display geometry, navigation, preferences, and shortcut matching. |
+| [`Sources/InputSafety`](Sources/InputSafety) | Native event thread, atomic configuration, action queue, and watchdog. |
+| [`Sources/QuickShiftDisplay`](Sources/QuickShiftDisplay) | AppKit interface, login items, local window movement on the main actor, and an Accessibility worker for external apps. |
+| [`Tests`](Tests) | Swift tests and native test fixtures. |
+| [`scripts`](scripts) | App and test-window builds, icon generation, and watchdog checks. |
 
-如果「辅助功能已授权，输入监听未启动」，可从设置检查「输入监控」权限，并退出重开应用。密码输入框／安全输入模式、系统保留组合键、第三方窗口工具和不实现辅助功能接口的应用，都可能影响某些操作。系统原生全屏窗口属于独立 Space，本工具会提示先退出全屏；不切换 Space、不模拟退出全屏。
+Build outputs and local diagnostics in `.build/` and `dist/` are excluded from Git. Maintenance guidelines are documented in [`AGENTS.md`](AGENTS.md).
 
-## 技术结构
+## Troubleshooting
 
-- `QuickShiftCore`：可测试的显示器导航、窗口放置、快捷键模型和输入序列状态机。
-- `InputSafety`：原生 C 事件线程、无锁匹配与动作队列、POSIX 看门狗和不记录按键内容的状态文件。
-- `GlobalShortcutMonitor`：Swift 配置与动作交付，输入回调不会进入此类。前台进程由激活通知维护，并随匹配动作保存快照。
-- `WindowMover`：在独立串行队列调用 `AXUIElement`，避免目标应用卡顿阻塞事件过滤器；移动后读取实际位置，检查应用是否响应。
-- `SettingsWindow` / `ShortcutRecorder`：AppKit 原生设置和录制面板。
-- 设置保存在应用的 `UserDefaults` 中。应用不记录按键内容、不联网，不需要屏幕录制权限。
+| Problem | What to do |
+| --- | --- |
+| Nothing moves | Confirm Accessibility permission, enable shortcuts, focus a regular window, and check that at least two extended displays are connected. |
+| Permission stops working after replacing the app | Check the signing identity and open the installed copy. After an intentional identity change, enable that copy in Accessibility. If macOS still lists only the old grant, remove the old QuickShift entry, then add the installed copy. See [signing for updates](#keep-accessibility-access-across-updates). |
+| Permission is granted but the listener is not ready | Use **Check Input Monitoring…** (`检查输入监控…`) if shown in QuickShift settings, then quit and reopen the app. |
+| The saved switch is on, but listening is paused | Check the status in settings. Use **Restart Listener** after a diagnostic or protective pause. For an unexpected exit, include a [diagnostic report](#diagnostic-report). |
+| Launch at login is waiting for approval | Use **Open Login Items Settings…** in QuickShift and allow the app in macOS. The shortcut switch is restored separately when it launches. |
+| A shortcut does not trigger | Check the exact modifier combination and conflicts with system shortcuts or other tools. Secure input fields can restrict event access. |
+| A full-screen window or a particular app will not move | Leave native full screen first. The target app must expose a movable window through macOS Accessibility. |
+| A previously filled window does not fill the destination | Resize it after moving. Full-width or full-height expansion is not guaranteed, and apps can enforce their own size limits. |
+| The build script says QuickShift is running | Quit from the QuickShift menu bar menu, then rerun the build. |
+| macOS blocks a packaged app | The default build is ad hoc signed and not notarized. Follow [Apple's instructions for opening apps on your Mac](https://support.apple.com/en-us/102445) for the relevant alert. |
 
-实现依据：[Apple CGEventTap 文档](https://developer.apple.com/documentation/coregraphics/cgevent/tapcreate(tap:place:options:eventsofinterest:callback:userinfo:))、[辅助功能窗口位置坐标](https://developer.apple.com/documentation/applicationservices/kaxpositionattribute)、[NSScreen.visibleFrame](https://developer.apple.com/documentation/appkit/nsscreen/visibleframe)。
+### Diagnostic report
+
+For an app installed in Applications:
+
+```bash
+/Applications/QuickShift.app/Contents/MacOS/QuickShiftDisplay --diagnostics
+```
+
+For a source build, use `dist/QuickShift.app/Contents/MacOS/QuickShiftDisplay --diagnostics` instead.
+
+The report includes display geometry, the last recorded input engine state, counters, callback duration, and a previous safety exit when available. It does not include keystroke contents. `diagnosticProcessAccessibilityTrusted` describes the command-line process; check the running app's settings for its permission status.
+
+| Fault code | Meaning |
+| --- | --- |
+| `0` | No safety fault recorded. |
+| `1` | Input callback stalled. |
+| `2` | Event loop stalled. |
+| `3` | Pending move actions were not delivered to the main loop. |
+| `4` | macOS reported an event tap timeout. |
+| `5` | The action queue overflowed. |

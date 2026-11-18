@@ -15,7 +15,7 @@ final class SettingsStore {
            let stored = try? JSONDecoder().decode(AppPreferences.self, from: data), stored.isValid {
             preferences = stored
         } else {
-            preferences = AppPreferences()
+            preferences = AppPreferences(isEnabled: false)
         }
     }
 

@@ -58,6 +58,15 @@ private func display(_ id: UInt32, _ frame: CGRect, visible: CGRect? = nil) -> D
     #expect(DisplayLayout.sourceIndex(for: .zero, in: []) == nil)
 }
 
+@Test func localWindowCoordinatesRoundTripAcrossDisplayOrigins() {
+    for frame in [CGRect(x: 100, y: 150, width: 600, height: 780),
+                  CGRect(x: -1400, y: 800, width: 600, height: 780),
+                  CGRect(x: 2000, y: -500, width: 600, height: 780)] {
+        let axFrame = DisplayLayout.accessibilityRect(fromAppKit: frame, primaryTop: 1080)
+        #expect(DisplayLayout.appKitRect(fromAccessibility: axFrame, primaryTop: 1080) == frame)
+    }
+}
+
 @Test func normalWindowsKeepSizeAndRelativePosition() {
     let source = display(1, CGRect(x: 0, y: 0, width: 1000, height: 800),
                          visible: CGRect(x: 0, y: 24, width: 1000, height: 750))

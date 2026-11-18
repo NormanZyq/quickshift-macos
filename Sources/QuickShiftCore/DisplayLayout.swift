@@ -21,6 +21,10 @@ public enum DisplayLayout {
         CGRect(x: rect.minX, y: primaryTop - rect.maxY, width: rect.width, height: rect.height)
     }
 
+    public static func appKitRect(fromAccessibility rect: CGRect, primaryTop: CGFloat) -> CGRect {
+        CGRect(x: rect.minX, y: primaryTop - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     /// Horizontal centers define left/right; vertically aligned displays use top-to-bottom order.
     public static func ordered(_ displays: [DisplayInfo]) -> [DisplayInfo] {
         displays.sorted {

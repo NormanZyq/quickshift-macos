@@ -40,6 +40,7 @@ typedef struct {
 QSDNativeInput *QSDNativeInputCreate(const char *statusPath, int32_t targetPID);
 void QSDNativeInputDestroy(QSDNativeInput *input);
 void QSDNativeInputConfigure(QSDNativeInput *input, QSDNativeConfiguration configuration);
+void QSDNativeInputSetForegroundPID(QSDNativeInput *input, int32_t pid);
 bool QSDNativeInputStart(QSDNativeInput *input);
 void QSDNativeInputStop(QSDNativeInput *input);
 void QSDNativeInputResetFault(QSDNativeInput *input);

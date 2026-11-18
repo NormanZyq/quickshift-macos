@@ -22,6 +22,7 @@ final class GlobalShortcutMonitor: @unchecked Sendable {
     private var state = State()
     private let statusURL: URL
     private let targetProcessID: pid_t
+    @MainActor var onUnexpectedStop: (() -> Void)?
 
     static var defaultStatusURL: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -74,7 +75,12 @@ final class GlobalShortcutMonitor: @unchecked Sendable {
 
     var foregroundProcessID: pid_t? {
         get { lock.withLock { state.foregroundProcessID } }
-        set { lock.withLock { state.foregroundProcessID = newValue; publishConfiguration() } }
+        set {
+            lock.withLock {
+                state.foregroundProcessID = newValue
+                if let native = state.native { QSDNativeInputSetForegroundPID(native, newValue ?? 0) }
+            }
+        }
     }
 
     var onShortcut: ShortcutHandler? {
@@ -97,7 +103,7 @@ final class GlobalShortcutMonitor: @unchecked Sendable {
             if state.attemptedStart { return QSDNativeInputIsRunning(native) }
             state.attemptedStart = true
             state.activity = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical], reason: "Handle window movement shortcuts"
+                options: .userInitiatedAllowingIdleSystemSleep, reason: "Keep the input safety deadline responsive"
             )
             let started = QSDNativeInputStart(native)
             if !started, let activity = state.activity {
@@ -112,6 +118,7 @@ final class GlobalShortcutMonitor: @unchecked Sendable {
     func stop() {
         lock.withLock {
             if let native = state.native { QSDNativeInputStop(native) }
+            state.attemptedStart = false
             if let activity = state.activity { ProcessInfo.processInfo.endActivity(activity); state.activity = nil }
         }
     }
@@ -164,6 +171,15 @@ final class GlobalShortcutMonitor: @unchecked Sendable {
         while QSDNativeInputReadAction(native, &action) {
             let callback = lock.withLock { state.onShortcut }
             callback?(action.direction == 0 ? .left : .right, action.foregroundPID > 0 ? action.foregroundPID : nil)
+        }
+        let endedActivity = lock.withLock { () -> NSObjectProtocol? in
+            guard let activity = state.activity, !QSDNativeInputIsRunning(native) else { return nil }
+            state.activity = nil
+            return activity
+        }
+        if let endedActivity {
+            ProcessInfo.processInfo.endActivity(endedActivity)
+            onUnexpectedStop?()
         }
     }
 

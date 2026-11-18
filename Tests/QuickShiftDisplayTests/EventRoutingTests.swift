@@ -5,8 +5,24 @@ import Testing
 @testable import QuickShiftDisplay
 
 private func testMonitor() -> GlobalShortcutMonitor {
-    GlobalShortcutMonitor(statusURL: FileManager.default.temporaryDirectory
+    let monitor = GlobalShortcutMonitor(statusURL: FileManager.default.temporaryDirectory
         .appendingPathComponent("QuickShift-\(UUID().uuidString).state"))
+    monitor.foregroundProcessID = 123
+    return monitor
+}
+
+@Test func shortcutWithoutAForegroundTargetPassesThroughTheWholePress() throws {
+    let monitor = testMonitor()
+    monitor.foregroundProcessID = nil
+    let event = try #require(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+                                    mouseCursorPosition: .zero, mouseButton: .left))
+    event.flags = [.maskControl, .maskCommand, .maskShift]
+    #expect(!monitor.handle(type: .leftMouseDown, event: event))
+    monitor.foregroundProcessID = 456
+    #expect(!monitor.handle(type: .leftMouseUp, event: event))
+    #expect(monitor.handle(type: .leftMouseDown, event: event))
+    monitor.foregroundProcessID = nil
+    #expect(monitor.handle(type: .leftMouseUp, event: event))
 }
 
 // These tests construct in-memory events only. They never install a global tap or post input.

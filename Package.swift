@@ -8,7 +8,8 @@ let package = Package(
     targets: [
         .target(name: "InputSafety", linkerSettings: [.linkedFramework("CoreGraphics"), .linkedFramework("CoreFoundation")]),
         .target(name: "QuickShiftCore"),
-        .executableTarget(name: "QuickShiftDisplay", dependencies: ["QuickShiftCore", "InputSafety"]),
+        .executableTarget(name: "QuickShiftDisplay", dependencies: ["QuickShiftCore", "InputSafety"],
+                          linkerSettings: [.linkedFramework("ServiceManagement")]),
         .testTarget(name: "QuickShiftCoreTests", dependencies: ["QuickShiftCore"]),
         .testTarget(name: "QuickShiftDisplayTests", dependencies: ["QuickShiftDisplay", "QuickShiftCore", "InputSafety"]),
     ]

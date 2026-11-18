@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let inputTargetPID = AppDelegate.testTargetProcessID()
     private lazy var monitor = GlobalShortcutMonitor(targetProcessID: inputTargetPID)
     private let mover = WindowMover()
+    private let loginItems = LoginItemController()
+    private var runtimeState = ShortcutRuntimeState()
     private let notice = NoticeController()
     private var settings: SettingsWindowController?
     private var statusItem: NSStatusItem?
@@ -18,9 +20,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let wrapItem = NSMenuItem(title: "循环切换显示器", action: nil, keyEquivalent: "")
     private let leftItem = NSMenuItem(title: "向左移动当前窗口", action: nil, keyEquivalent: "")
     private let rightItem = NSMenuItem(title: "向右移动当前窗口", action: nil, keyEquivalent: "")
-    private var permissionTimer: Timer?
     private var screenObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
+    private var systemSettingsWasActive = false
+    private var pendingGrantTimer: Timer?
+    private var permissionCheckDeadline: ContinuousClock.Instant?
     private var menuProcessID: pid_t?
     private var trusted = false
     private var displays: [DisplayInfo] = []
@@ -34,52 +38,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let previousExitWasClean = UserDefaults.standard.object(forKey: "lastRunEndedCleanly") as? Bool ?? true
-        let inputEngineWasUpdated = UserDefaults.standard.integer(forKey: "inputEngineRevision") < 5
-        let scopeID = inputTargetPID == 0 ? "global" : "test:\(inputTargetPID)"
-        let scopeChanged = UserDefaults.standard.string(forKey: "inputScope") != scopeID
-        let lastSafetyFault = GlobalShortcutMonitor.lastStatus()?.fault ?? 0
-        let shouldStartPaused = inputEngineWasUpdated || scopeChanged || lastSafetyFault != 0
-            || !previousExitWasClean || CommandLine.arguments.contains("--paused")
-        if shouldStartPaused {
-            store.update { $0.isEnabled = false }
-        }
-        UserDefaults.standard.set(5, forKey: "inputEngineRevision")
-        UserDefaults.standard.set(scopeID, forKey: "inputScope")
-        UserDefaults.standard.set(false, forKey: "lastRunEndedCleanly")
+        runtimeState = ShortcutRuntimeState(forcePaused: CommandLine.arguments.contains("--paused"),
+                                            testMode: inputTargetPID != 0,
+                                            previousSafetyFault: GlobalShortcutMonitor.lastStatus()?.fault ?? 0)
         buildMenu()
         monitor.preferences = store.preferences
-        monitor.foregroundProcessID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let foreground = NSWorkspace.shared.frontmostApplication
+        monitor.foregroundProcessID = foreground?.processIdentifier
+        systemSettingsWasActive = foreground?.bundleIdentifier == "com.apple.systempreferences"
         monitor.onShortcut = { [weak self] direction, processID in self?.move(direction, processID: processID) }
+        monitor.onUnexpectedStop = { [weak self] in self?.refreshRuntime() }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] notification in
-            let processID = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let processID = app?.processIdentifier
+            let systemSettingsIsActive = app?.bundleIdentifier == "com.apple.systempreferences"
             MainActor.assumeIsolated {
-                self?.monitor.foregroundProcessID = processID
+                guard let self else { return }
+                self.monitor.foregroundProcessID = processID
+                let returnedFromSettings = self.systemSettingsWasActive && !systemSettingsIsActive
+                self.systemSettingsWasActive = systemSettingsIsActive
+                if returnedFromSettings {
+                    self.permissionCheckDeadline = nil
+                    self.refreshRuntime()
+                }
+                else if systemSettingsIsActive { self.updatePendingGrantTimer() }
             }
         }
         store.onChange = { [weak self] in
             guard let self else { return }
             let wasEnabled = monitor.preferences.isEnabled
             monitor.preferences = store.preferences
-            if !wasEnabled && store.preferences.isEnabled { monitor.resetSuspensionForUserRequest() }
+            if !wasEnabled && store.preferences.isEnabled {
+                runtimeState.resume()
+                monitor.resetSuspensionForUserRequest()
+            }
             settings?.refreshPreferences()
             refreshRuntime()
         }
+        displays = ScreenSnapshot.current()
         refreshRuntime()
-        permissionTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshRuntime() }
-        }
-        permissionTimer?.tolerance = 0.5
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshRuntime() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.displays = ScreenSnapshot.current()
+                self.refreshMenu()
+                self.refreshSettingsStatus()
+            }
         }
         let hasLaunched = UserDefaults.standard.bool(forKey: "hasLaunched")
         UserDefaults.standard.set(true, forKey: "hasLaunched")
-        if !hasLaunched || !trusted || shouldStartPaused { showSettings() }
+        if runtimeState.shouldOpenSettings(hasLaunched: hasLaunched, userEnabled: store.preferences.isEnabled, trusted: trusted) {
+            showSettings()
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if settings?.window?.isVisible == true { refreshRuntime() }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -89,8 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         monitor.stop()
-        UserDefaults.standard.set(true, forKey: "lastRunEndedCleanly")
-        permissionTimer?.invalidate()
+        pendingGrantTimer?.invalidate()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
     }
@@ -138,15 +155,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.addItem(quitItem.copy() as! NSMenuItem)
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let windowItem = NSMenuItem()
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
         NSApp.mainMenu = mainMenu
     }
 
     private func refreshRuntime() {
         trusted = AXIsProcessTrusted()
-        if trusted && store.preferences.isEnabled { monitor.start() } else { monitor.stop() }
-        displays = ScreenSnapshot.current()
+        if runtimeState.shouldListen(userEnabled: store.preferences.isEnabled, trusted: trusted) {
+            monitor.start()
+        } else { monitor.stop() }
         refreshMenu()
         refreshSettingsStatus()
+        updatePendingGrantTimer()
+    }
+
+    private func updatePendingGrantTimer() {
+        // A grant can arrive while System Settings still has focus. Stop checking
+        // as soon as it succeeds or the user leaves the permission workflow.
+        if trusted { permissionCheckDeadline = nil }
+        guard systemSettingsWasActive, let permissionCheckDeadline, .now < permissionCheckDeadline else {
+            pendingGrantTimer?.invalidate()
+            pendingGrantTimer = nil
+            return
+        }
+        guard pendingGrantTimer == nil else { return }
+        pendingGrantTimer = Timer.scheduledTimer(timeInterval: 2.5, target: self,
+            selector: #selector(checkPendingGrant), userInfo: nil, repeats: false)
+        pendingGrantTimer?.tolerance = 0.5
+    }
+
+    @objc private func checkPendingGrant() {
+        pendingGrantTimer = nil
+        if AXIsProcessTrusted() { refreshRuntime() } else { updatePendingGrantTimer() }
     }
 
     private func refreshMenu() {
@@ -161,20 +205,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshSettingsStatus() {
-        settings?.refreshStatus(trusted: trusted, listening: monitor.isRunning, displays: displays,
-                                safelySuspended: monitor.isSafelySuspended, testOnly: inputTargetPID != 0)
+        guard let settings, settings.window?.isVisible == true else { return }
+        settings.refreshStatus(trusted: trusted, listening: monitor.isRunning, displays: displays,
+                               safelySuspended: monitor.isSafelySuspended, testOnly: inputTargetPID != 0,
+                               startupSuspension: runtimeState.suspension?.explanation)
+        settings.refreshLoginItemStatus(loginItems.status, errorMessage: loginItems.errorMessage)
     }
 
-    private func move(_ direction: MoveDirection, processID: pid_t? = nil) {
-        guard trusted else { showSettings(); return }
-        let candidatePID = inputTargetPID != 0 ? (inputTargetPID > 0 ? inputTargetPID : nil)
-            : (processID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier)
-        guard let pid = candidatePID else {
+    private func move(_ direction: MoveDirection, processID: pid_t?) {
+        guard AXIsProcessTrusted() else { showSettings(); return }
+        guard let pid = inputTargetPID == 0 ? processID : inputTargetPID, pid > 0 else {
             notice.show(MoveFailure.noWindow.localizedDescription)
             return
         }
-        // Capture the app before returning from the event callback. The matched click is discarded,
-        // so an app under the pointer never replaces the intended foreground app.
+        // Use the PID captured with this action. Refresh geometry because the Dock can change the visible frame.
         let currentDisplays = ScreenSnapshot.current()
         mover.move(processID: pid, direction: direction, displays: currentDisplays, wraps: store.preferences.wrapsDisplays) { [weak self] result in
             if case let .failure(error) = result { self?.notice.show(error.localizedDescription) }
@@ -184,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func showSettings() {
         if settings == nil {
             let controller = SettingsWindowController(store: store, testOnly: inputTargetPID != 0)
+            controller.onClose = { [weak self] in self?.settings = nil }
             controller.onRequestAccessibility = { [weak self] in self?.requestAccessibility() }
             controller.onRequestInputMonitoring = {
                 _ = CGRequestListenEventAccess()
@@ -191,20 +236,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             controller.onRecordingChanged = { [weak self] in self?.monitor.isRecording = $0 }
             controller.onRestartMonitoring = { [weak self] in self?.restartMonitor() }
+            controller.onSetLoginItemEnabled = { [weak self] enabled in
+                guard let self else { return }
+                loginItems.setEnabled(enabled)
+                refreshSettingsStatus()
+            }
+            controller.onRequestLoginItemSettings = { [weak self] in self?.loginItems.openSettings() }
             settings = controller
         }
-        refreshRuntime()
         settings?.refreshPreferences()
         settings?.showWindow(nil)
+        refreshRuntime()
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private func requestAccessibility() {
         if !AXIsProcessTrusted() {
+            permissionCheckDeadline = .now.advanced(by: .seconds(60))
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
         }
         Self.openPrivacyPane("Privacy_Accessibility")
+        updatePendingGrantTimer()
     }
 
     private static func openPrivacyPane(_ pane: String) {
@@ -218,6 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func moveLeft() { move(.left, processID: menuProcessID) }
     @objc private func moveRight() { move(.right, processID: menuProcessID) }
     @objc private func restartMonitor() {
+        runtimeState.resume()
         monitor.resetSuspensionForUserRequest()
         refreshRuntime()
     }

@@ -1,18 +1,28 @@
 import AppKit
 import QuickShiftCore
 
+private final class SettingsDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let store: SettingsStore
     var onRequestAccessibility: (() -> Void)?
     var onRequestInputMonitoring: (() -> Void)?
     var onRecordingChanged: ((Bool) -> Void)?
+    var onClose: (() -> Void)?
     var onRestartMonitoring: (() -> Void)?
+    var onSetLoginItemEnabled: ((Bool) -> Void)?
+    var onRequestLoginItemSettings: (() -> Void)?
     private var recorder: ShortcutRecorderController?
     private let leftButton = NSButton()
     private let rightButton = NSButton()
     private let enabledCheckbox = NSButton(checkboxWithTitle: "启用全局快捷键", target: nil, action: nil)
     private let wrapCheckbox = NSButton(checkboxWithTitle: "循环切换显示器", target: nil, action: nil)
+    private let loginCheckbox = NSButton(checkboxWithTitle: "登录时启动", target: nil, action: nil)
+    private let loginDetail = NSTextField(wrappingLabelWithString: "")
+    private let loginSettingsButton = NSButton(title: "打开登录项设置…", target: nil, action: nil)
     private let displayLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
     private let permissionDetail = NSTextField(wrappingLabelWithString: "")
@@ -22,14 +32,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     init(store: SettingsStore, testOnly: Bool = false) {
         self.store = store
+        let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
+        let availableHeight = NSScreen.main.map { NSWindow.contentRect(forFrameRect: $0.visibleFrame, styleMask: style).height } ?? 820
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 700),
-            styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: min(820, availableHeight)),
+            styleMask: style, backing: .buffered, defer: false
         )
         window.title = testOnly ? "QuickShift 设置 · 隔离测试" : "QuickShift 设置"
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName("QuickShiftSettings")
+        window.contentMinSize = NSSize(width: 560, height: min(360, availableHeight))
         window.center()
+        window.setFrameAutosaveName("QuickShiftSettings")
         super.init(window: window)
         window.delegate = self
         buildContent(window)
@@ -46,7 +59,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         wrapCheckbox.state = preferences.wrapsDisplays ? .on : .off
     }
 
-    func refreshStatus(trusted: Bool, listening: Bool, displays: [DisplayInfo], safelySuspended: Bool = false, testOnly: Bool = false) {
+    func refreshStatus(trusted: Bool, listening: Bool, displays: [DisplayInfo], safelySuspended: Bool = false,
+                       testOnly: Bool = false, startupSuspension: String? = nil) {
         if !store.preferences.isEnabled {
             statusLabel.stringValue = "●  快捷键已暂停"
             statusLabel.textColor = .secondaryLabelColor
@@ -56,11 +70,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         } else if !trusted {
             statusLabel.stringValue = "●  需要辅助功能权限"
             statusLabel.textColor = .systemOrange
-            permissionDetail.stringValue = "授权后，QuickShift 才能捕获组合键并移动其他应用的窗口。"
+            permissionDetail.stringValue = "请在辅助功能中开启 QuickShift。若更新后开关已开启，仍提示需要权限，可移除旧的 QuickShift 条目，再添加当前安装的应用。"
         } else if safelySuspended {
             statusLabel.stringValue = "●  输入监听已保护性暂停"
             statusLabel.textColor = .systemOrange
             permissionDetail.stringValue = "系统已关闭输入监听以恢复正常输入。需要时可手动重新启动监听。"
+        } else if let startupSuspension {
+            statusLabel.stringValue = "●  本次监听已暂停"
+            statusLabel.textColor = .systemOrange
+            permissionDetail.stringValue = startupSuspension
         } else if !listening {
             statusLabel.stringValue = "●  辅助功能已授权，输入监听未启动"
             statusLabel.textColor = .systemOrange
@@ -72,16 +90,39 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 : "辅助功能已授权。QuickShift 在菜单栏运行，关闭此窗口后仍可使用。"
         }
         permissionButton.title = trusted ? "查看辅助功能设置…" : "打开辅助功能设置…"
-        inputButton.isHidden = !trusted || listening || safelySuspended || !store.preferences.isEnabled
+        inputButton.isHidden = !trusted || listening || safelySuspended || startupSuspension != nil || !store.preferences.isEnabled
         restartButton.isHidden = !trusted || listening || !store.preferences.isEnabled
         let names = displays.enumerated().map { "\($0.offset + 1). \($0.element.name)" }.joined(separator: "   →   ")
         displayLabel.stringValue = displays.count > 1 ? names : "\(names)\n连接另一台显示器后即可移屏。"
     }
 
-    func windowWillClose(_ notification: Notification) { recorder?.cancel() }
+    func windowWillClose(_ notification: Notification) {
+        recorder?.cancel()
+        onClose?()
+    }
+
+    func refreshLoginItemStatus(_ status: LoginItemStatus, errorMessage: String?) {
+        loginCheckbox.state = status.isRequested ? .on : .off
+        loginDetail.stringValue = errorMessage ?? status.explanation
+        loginDetail.textColor = errorMessage != nil || status.needsSystemSettings ? .systemOrange : .secondaryLabelColor
+        loginSettingsButton.isHidden = !status.needsSystemSettings
+    }
 
     private func buildContent(_ window: NSWindow) {
-        guard let content = window.contentView else { return }
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        window.contentView = scroll
+        let content = SettingsDocumentView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = content
+        let clip = scroll.contentView
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
+            content.topAnchor.constraint(equalTo: clip.topAnchor),
+        ])
         let icon = NSImageView(image: NSImage(systemSymbolName: "display.2", accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = .controlAccentColor
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 36, weight: .medium)
@@ -129,6 +170,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             wrappingLabel("开启循环：最左侧再向左会移到最右侧；关闭后在屏幕边缘停止。"),
         ])
 
+        loginCheckbox.target = self
+        loginCheckbox.action = #selector(toggleLoginItem)
+        loginDetail.font = .systemFont(ofSize: 12)
+        loginDetail.preferredMaxLayoutWidth = 500
+        loginDetail.textColor = .secondaryLabelColor
+        loginSettingsButton.target = self
+        loginSettingsButton.action = #selector(openLoginItemSettings)
+        loginSettingsButton.bezelStyle = .rounded
+        loginSettingsButton.isHidden = true
+        let loginGroup = card([loginCheckbox, loginDetail, loginSettingsButton])
+
         displayLabel.font = .systemFont(ofSize: 12)
         displayLabel.textColor = .secondaryLabelColor
         let displaysGroup = vertical([
@@ -137,19 +189,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         let resetButton = NSButton(title: "恢复默认快捷键", target: self, action: #selector(resetShortcuts))
         resetButton.bezelStyle = .rounded
-        let version = label("QuickShift 1.1.1 · 原生 macOS 工具", size: 11, secondary: true)
+        let versionString = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
+        let version = label("QuickShift \(versionString)", size: 11, secondary: true)
         let footer = NSStackView(views: [version, NSView(), resetButton])
         footer.orientation = .horizontal
-        let stack = vertical([header, permissionGroup, shortcutsGroup, behaviorGroup, displaysGroup, footer], spacing: 18)
+        let stack = vertical([header, permissionGroup, shortcutsGroup, behaviorGroup, loginGroup, displaysGroup, footer], spacing: 18)
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
         ])
-        for view in [header, permissionGroup, shortcutsGroup, behaviorGroup, displaysGroup, footer] {
+        for view in [header, permissionGroup, shortcutsGroup, behaviorGroup, loginGroup, displaysGroup, footer] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         displayLabel.widthAnchor.constraint(equalTo: displaysGroup.widthAnchor).isActive = true
@@ -221,6 +274,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func toggleEnabled() { store.update { $0.isEnabled = enabledCheckbox.state == .on } }
     @objc private func toggleWrap() { store.update { $0.wrapsDisplays = wrapCheckbox.state == .on } }
+    @objc private func toggleLoginItem() { onSetLoginItemEnabled?(loginCheckbox.state == .on) }
+    @objc private func openLoginItemSettings() { onRequestLoginItemSettings?() }
     @objc private func resetShortcuts() { store.resetShortcuts() }
     @objc private func requestAccessibility() { onRequestAccessibility?() }
     @objc private func requestInput() { onRequestInputMonitoring?() }
