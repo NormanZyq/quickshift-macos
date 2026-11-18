@@ -1,0 +1,194 @@
+name: Build and release
+run-name: Release ${{ inputs.release_tag }} from ${{ inputs.source_ref || github.ref_name }}
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Commit SHA, branch, or tag to build; blank uses the selected workflow ref
+        required: false
+        type: string
+      release_tag:
+        description: New release tag matching the app version, e.g. v1.2.1 or v1.2.1-rc.1
+        required: true
+        type: string
+      signing:
+        description: Distribution channel
+        type: choice
+        default: ad-hoc
+        options:
+          - ad-hoc
+          - developer-id
+      draft:
+        description: Leave the completed release as a draft
+        type: boolean
+        default: false
+      prerelease:
+        description: Mark as a prerelease
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and build universal app
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    outputs:
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+    steps:
+      # Use release tools from the workflow revision, even when building an older commit.
+      - name: Check out release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+      - name: Check out selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve commit and check release tag
+        id: plan
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: >-
+          python3 tooling/scripts/ci/release.py plan
+          --source "$GITHUB_WORKSPACE/source"
+          --tag "$RELEASE_TAG"
+          --output "$RUNNER_TEMP/release-plan.json"
+          --check-github
+      - name: Check release tools
+        working-directory: tooling
+        run: python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py'
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Test selected source
+        working-directory: source
+        run: |
+          swift test --disable-sandbox --cache-path .build/cache
+          python3 scripts/test-watchdog.py
+          if [ -f scripts/test-signing.sh ]; then bash scripts/test-signing.sh; fi
+      - name: Build Apple Silicon and Intel app
+        working-directory: source
+        env:
+          SIGNING_IDENTITY: "-"
+          QUICKSHIFT_APP_PATH: ${{ github.workspace }}/source/dist/QuickShift.app
+        run: bash scripts/build-app.sh --arch arm64 --arch x86_64
+      - name: Package and checksum
+        run: >-
+          python3 tooling/scripts/ci/release.py package
+          --plan "$RUNNER_TEMP/release-plan.json"
+          --app "$GITHUB_WORKSPACE/source/dist/QuickShift.app"
+          --output "$RUNNER_TEMP/quickshift-release"
+      - name: Upload build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quickshift-release-ad-hoc
+          path: ${{ runner.temp }}/quickshift-release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+  sign:
+    name: Developer ID signing and notarization
+    needs: build
+    if: ${{ inputs.signing == 'developer-id' }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - name: Check out release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+      - name: Download build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: quickshift-release-ad-hoc
+          path: ${{ runner.temp }}/quickshift-input
+          digest-mismatch: error
+      # Source builds run in the preceding job, without access to Apple credentials.
+      - name: Sign, notarize, staple, and repackage
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: >-
+          python3 tooling/scripts/ci/sign_release.py
+          --input "$RUNNER_TEMP/quickshift-input"
+          --output "$RUNNER_TEMP/quickshift-signed"
+          --work "$RUNNER_TEMP/quickshift-signing"
+          --sha "$SOURCE_SHA" --tag "$RELEASE_TAG"
+      - name: Remove signing material
+        if: ${{ always() }}
+        run: python3 tooling/scripts/ci/sign_release.py --cleanup --work "$RUNNER_TEMP/quickshift-signing"
+      - name: Upload signed release
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quickshift-release-developer-id
+          path: ${{ runner.temp }}/quickshift-signed/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build, sign]
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' &&
+          (needs.sign.result == 'success' ||
+           (inputs.signing == 'ad-hoc' && needs.sign.result == 'skipped')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+      - name: Download release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: quickshift-release-${{ inputs.signing }}
+          path: ${{ runner.temp }}/quickshift-release
+          digest-mismatch: error
+      - name: Publish selected commit
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          SIGNING_CHANNEL: ${{ inputs.signing }}
+          RELEASE_DRAFT: ${{ inputs.draft }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+        run: >-
+          python3 tooling/scripts/ci/release.py publish
+          --input "$RUNNER_TEMP/quickshift-release"
+          --sha "$SOURCE_SHA" --tag "$RELEASE_TAG" --signing "$SIGNING_CHANNEL"

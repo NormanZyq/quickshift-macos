@@ -33,7 +33,7 @@ A native macOS menu bar utility for moving the active window between displays.
 
 Requires **macOS 13 or later** and at least **two displays in extended desktop mode**. Mirrored displays share a workspace and do not provide separate destinations.
 
-- **Packaged app:** extract the archive and move `QuickShift.app` to your Applications folder.
+- **Packaged app:** download the universal ZIP from this repository's **Releases** page, extract it, and move `QuickShift.app` to your Applications folder. Check the release notes for its signing and notarization status.
 - **From source:** [build the app](#build-from-source), then move `dist/QuickShift.app` to your Applications folder.
 
 Open QuickShift from its installed location before granting permissions.
@@ -133,6 +133,51 @@ macOS records Accessibility consent against the app's code identity. For normal 
 
 An existing ad hoc grant is tied to that build's code hash. When migrating an installed ad hoc copy to your configured certificate, quit QuickShift, run `QUICKSHIFT_ALLOW_IDENTITY_CHANGE=1 bash scripts/build-app.sh`, and grant Accessibility to the new copy once. Subsequent builds use the saved identity. Developer ID builds use the hardened runtime and a secure timestamp. Public distribution also requires a separate notarization step for the standard Gatekeeper experience. [Apple's notarization guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 
+### GitHub Releases
+
+The [release workflow](.github/workflows/release.yml) runs only when manually dispatched. Push it to the repository's default branch, then open **Actions → Build and release → Run workflow**. The workflow must exist on the default branch for GitHub to offer manual runs. [GitHub's manual workflow guide](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+
+| Input | Behavior |
+| --- | --- |
+| `source_ref` | Commit SHA, branch, or tag to build. Prefer a full commit SHA; leaving it blank builds the selected workflow branch's commit. |
+| `release_tag` | New tag such as `v1.2.1` or `v1.2.1-rc.1`. Its version must match `CFBundleShortVersionString` in the selected commit's `Resources/Info.plist`. |
+| `signing` | `ad-hoc` requires no Apple credentials. `developer-id` signs and notarizes using the secrets below. |
+| `draft` | Leave the completed release as a draft instead of publishing it. Off by default. |
+| `prerelease` | Mark the release as a prerelease. Off by default; a tag suffix does not enable it automatically. |
+
+The workflow tests the selected source, builds a universal app for Apple Silicon and Intel, and creates these Release attachments:
+
+- `QuickShift-<tag>-macOS-universal.zip`
+- `SHA256SUMS.txt`
+- `build-info.json`, recording the exact source commit, app version, architectures, signing channel, and workflow run
+- `release-notes.md`, also used as the release description
+
+All attachments are uploaded before publishing. An existing release is never replaced; an existing tag is accepted only when it points to the selected commit. Update the version in `Resources/Info.plist` before tagging a new app version. The workflow does not rewrite source files or move tags.
+
+For normal releases from the default branch, the built-in `GITHUB_TOKEN` is sufficient; only the publish job requests `contents: write`. Repository or organization policy must allow GitHub Actions and these permissions. Release tooling comes from the workflow revision, while the app is built from `source_ref`.
+
+If a target commit changes workflow files relative to the default branch, GitHub can require workflow write permission when creating its release or tag. For that case, optionally configure the repository secret `RELEASE_TOKEN` with a fine-grained token restricted to this repository and **Contents: Read and write** plus **Workflows: Read and write**. Only the publish step uses it. [GitHub's release API permissions](https://docs.github.com/en/rest/releases/releases#create-a-release)
+
+#### Optional Developer ID signing and notarization
+
+For the `developer-id` channel, add these **repository Actions secrets** in **Settings → Secrets and variables → Actions**. An Apple Developer Program membership, a Developer ID Application certificate with its private key, and a team App Store Connect API key with notarization access are required.
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | Base64 contents of a `.p12` export containing exactly one valid **Developer ID Application** signing identity and its private key. |
+| `MACOS_CERTIFICATE_PASSWORD` | The nonempty password used for the `.p12` export. |
+| `APPLE_NOTARY_KEY_ID` | App Store Connect team API key ID. |
+| `APPLE_NOTARY_ISSUER_ID` | The API key's issuer ID. |
+| `APPLE_NOTARY_PRIVATE_KEY` | Complete contents of the API key's `.p8` file, including its header and footer. |
+
+The signing job imports the certificate into a temporary keychain, submits the app to Apple, staples the accepted notarization ticket, and recreates the ZIP and checksums. It removes the imported credentials afterward. Use the same signing channel and team for subsequent updates to keep a consistent app identity.
+
+The default `ad-hoc` channel skips Apple signing and notarization; macOS may require explicit approval to open it, and an update can require renewed Accessibility permission. Verify downloaded attachments together:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
 ### Tests
 
 Run the Swift suite and the native watchdog checks from the repository root. The watchdog checks also require Python 3.
@@ -141,6 +186,7 @@ Run the Swift suite and the native watchdog checks from the repository root. The
 swift test
 python3 scripts/test-watchdog.py
 bash scripts/test-signing.sh
+python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py'
 ```
 
 The suites cover display navigation and placement, shortcut validation and persistence, startup preferences, local and external window routing, login item state, input matching and release handling, and watchdog recovery. Swift tests use in-memory events and simulated login services; watchdog checks use isolated subprocesses. Neither installs an event tap or posts system input.
@@ -178,6 +224,7 @@ Enable shortcuts in the app to begin. This mode accepts only the QuickShiftProbe
 | [`Sources/QuickShiftDisplay`](Sources/QuickShiftDisplay) | AppKit interface, login items, local window movement on the main actor, and an Accessibility worker for external apps. |
 | [`Tests`](Tests) | Swift tests and native test fixtures. |
 | [`scripts`](scripts) | App and test-window builds, icon generation, and watchdog checks. |
+| [`.github/workflows/release.yml`](.github/workflows/release.yml), [`scripts/ci`](scripts/ci) | Manual universal builds, release packaging, optional notarization, and publishing. |
 
 Build outputs and local diagnostics in `.build/` and `dist/` are excluded from Git. Maintenance guidelines are documented in [`AGENTS.md`](AGENTS.md).
 
@@ -195,6 +242,8 @@ Build outputs and local diagnostics in `.build/` and `dist/` are excluded from G
 | A previously filled window does not fill the destination | Resize it after moving. Full-width or full-height expansion is not guaranteed, and apps can enforce their own size limits. |
 | The build script says QuickShift is running | Quit from the QuickShift menu bar menu, then rerun the build. |
 | macOS blocks a packaged app | The default build is ad hoc signed and not notarized. Follow [Apple's instructions for opening apps on your Mac](https://support.apple.com/en-us/102445) for the relevant alert. |
+| **Run workflow** is missing | Push the release workflow to the repository's default branch and check Actions access. See [GitHub Releases](#github-releases). |
+| A release run rejects the tag or a previous attempt left a draft | Use a tag matching the selected app version. For an existing tag, select its exact commit. Remove a failed draft before retrying that tag, or choose a new version suffix; published releases are not overwritten. |
 
 ### Diagnostic report
 

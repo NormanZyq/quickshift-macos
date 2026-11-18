@@ -29,6 +29,11 @@ These notes apply to this repository. Keep operational constraints and regressio
 
 ## Validation
 
+- `.github/workflows/release.yml` is a manual-only release path. Build the requested revision at its resolved full SHA; run release tooling from the workflow revision. Do not add push/tag publishing without an explicit request.
+- Keep source execution, Apple credential handling, and release write access in separate jobs. Import Apple keys only into the disposable signing job and remove its temporary keychain and key files, including on failure.
+- Release archives must contain both architectures and match the selected source's bundle version. Verify checksums and metadata after artifact transfer. Refuse existing releases and conflicting tags; assemble attachments in a draft before publishing.
+- Changes to release helpers require their isolated Python tests and workflow syntax checks. These tests use fake API responses and disposable archives; they must not publish releases, access signing credentials, or modify the installed app.
+
 The normal checks are documented in the README. In a restricted development environment, keep compiler and SwiftPM caches inside the repository:
 
 ```bash

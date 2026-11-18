@@ -33,7 +33,7 @@
 
 需要 **macOS 13 或以上**，以及至少 **两台处于扩展模式的显示器**。镜像显示共享同一工作区，不提供独立的移屏目标。
 
-- **应用包安装：**解压应用包，将 `QuickShift.app` 移到「应用程序」文件夹。
+- **应用包安装：**从本仓库的 **Releases** 页面下载通用 ZIP，解压后将 `QuickShift.app` 移到「应用程序」文件夹。签名和公证状态见对应的发布说明。
 - **从源码安装：**先[构建应用](#从源码构建)，再将 `dist/QuickShift.app` 移到「应用程序」文件夹。
 
 从最终安装位置打开 QuickShift，再授予权限。
@@ -131,6 +131,51 @@ macOS 按应用的代码身份记录辅助功能授权。日常更新请沿用 B
 
 已安装的 ad hoc 版本，其授权绑定到那次构建的代码哈希。首次迁移到已配置的证书时，从菜单退出 QuickShift，运行 `QUICKSHIFT_ALLOW_IDENTITY_CHANGE=1 bash scripts/build-app.sh`，再为新身份授予一次辅助功能权限。之后构建会沿用保存的身份。Developer ID 构建会启用强化运行时和安全时间戳。公开分发如需通过标准 Gatekeeper 检查，还需单独提交 Apple 公证。[Apple 公证指南](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 
+### GitHub Releases
+
+[发布工作流](.github/workflows/release.yml)仅支持手动触发。将配置推送到仓库默认分支后，打开 **Actions → Build and release → Run workflow**。工作流必须先存在于默认分支，GitHub 才会显示手动运行入口。[GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+
+| 参数 | 行为 |
+| --- | --- |
+| `source_ref` | 要打包的提交 SHA、分支或标签。建议填写完整提交 SHA；留空时构建所选工作流分支在触发时的提交。 |
+| `release_tag` | 新标签，例如 `v1.2.1` 或 `v1.2.1-rc.1`。版本部分必须与所选提交中 `Resources/Info.plist` 的 `CFBundleShortVersionString` 一致。 |
+| `signing` | `ad-hoc` 无需 Apple 凭据；`developer-id` 使用下方 Secrets 完成证书签名和公证。 |
+| `draft` | 附件齐全后保留为草稿，不立即公开发布，默认关闭。 |
+| `prerelease` | 标记为预发布，默认关闭；标签后缀不会自动开启此选项。 |
+
+工作流会测试所选源码，构建 Apple Silicon 与 Intel 通用应用，并生成以下 Release 附件：
+
+- `QuickShift-<tag>-macOS-universal.zip`
+- `SHA256SUMS.txt`
+- `build-info.json`：记录完整源码提交、应用版本、架构、签名类型与工作流运行地址
+- `release-notes.md`：同时作为 Release 正文
+
+所有附件上传完成后才会公开发布。已有 Release 不会被替换；已有标签仅在指向所选提交时可用。发布新的应用版本前，先修改 `Resources/Info.plist` 中的版本号。工作流不会改写源码或移动标签。
+
+默认分支上的常规发布使用内置 `GITHUB_TOKEN` 即可，仅发布任务申请 `contents: write` 权限。仓库或组织策略需要允许 GitHub Actions 及相应权限。发布脚本来自工作流所在提交，应用源码来自 `source_ref`。
+
+若目标提交相对默认分支修改了工作流文件，GitHub 在创建 Release 或标签时可能要求工作流写权限。此时可选配置仓库 Secret `RELEASE_TOKEN`，使用仅限当前仓库的 fine-grained token，赋予 **Contents: Read and write** 和 **Workflows: Read and write** 权限，仅发布步骤使用它。[GitHub Release API 权限说明](https://docs.github.com/en/rest/releases/releases#create-a-release)
+
+#### 可选的 Developer ID 签名与公证
+
+使用 `developer-id` 类型时，在 **Settings → Secrets and variables → Actions** 添加下列**仓库级 Actions Secrets**。需要 Apple Developer Program 会员资格、包含私钥的 Developer ID Application 证书，以及具有公证权限的 App Store Connect 团队 API 密钥。
+
+| Secret | 内容 |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | `.p12` 导出文件的 Base64 内容，其中必须恰好包含一个有效的 **Developer ID Application** 签名身份及其私钥。 |
+| `MACOS_CERTIFICATE_PASSWORD` | 导出 `.p12` 时设置的非空密码。 |
+| `APPLE_NOTARY_KEY_ID` | App Store Connect 团队 API 密钥 ID。 |
+| `APPLE_NOTARY_ISSUER_ID` | API 密钥的 issuer ID。 |
+| `APPLE_NOTARY_PRIVATE_KEY` | API 密钥 `.p8` 文件的完整内容，包含头尾标记。 |
+
+签名任务会将证书导入临时钥匙串、提交 Apple 公证、将通过公证的票据装订到应用，再重新生成 ZIP 和校验值，结束后清理导入的凭据。后续更新应沿用同一签名类型和团队，保持应用身份一致。
+
+默认 `ad-hoc` 类型跳过 Apple 证书签名与公证；macOS 可能要求手动批准打开，更新后也可能需要重新授予辅助功能权限。将所有附件下载到同一目录后，可执行校验：
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
 ### 测试
 
 在仓库根目录运行 Swift 测试和原生看门狗检查。看门狗检查还需要 Python 3。
@@ -139,6 +184,7 @@ macOS 按应用的代码身份记录辅助功能授权。日常更新请沿用 B
 swift test
 python3 scripts/test-watchdog.py
 bash scripts/test-signing.sh
+python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py'
 ```
 
 测试覆盖显示器导航与窗口放置、快捷键校验与保存、启动偏好、自身与外部窗口的处理路径、登录项状态、输入匹配及松开处理、看门狗恢复。Swift 测试使用内存事件和模拟登录项服务，看门狗检查运行于独立子进程；两者均不会安装事件过滤器或发送系统输入。
@@ -176,6 +222,7 @@ open dist/QuickShift.app --args --test-target-pid 12345 --paused
 | [`Sources/QuickShiftDisplay`](Sources/QuickShiftDisplay) | AppKit 界面、登录项、自身窗口的主线程操作，以及外部窗口的辅助功能队列。 |
 | [`Tests`](Tests) | Swift 测试与原生测试夹具。 |
 | [`scripts`](scripts) | 应用及测试窗口构建、图标生成和看门狗检查。 |
+| [`.github/workflows/release.yml`](.github/workflows/release.yml)、[`scripts/ci`](scripts/ci) | 手动触发的通用构建、发布打包、可选公证与 Release 发布。 |
 
 `.build/` 和 `dist/` 中的编译产物与本机诊断文件不纳入 Git。维护规范见 [`AGENTS.md`](AGENTS.md)。
 
@@ -193,6 +240,8 @@ open dist/QuickShift.app --args --test-target-pid 12345 --paused
 | 原本铺满的窗口没有铺满目标屏幕 | 移动后手动调整尺寸。自动扩展到目标屏幕的完整宽度或高度不作保证，应用自身也可能限制尺寸。 |
 | 构建脚本提示 QuickShift 正在运行 | 从 QuickShift 菜单栏菜单退出，再重新构建。 |
 | macOS 阻止打开应用包 | 默认构建使用 ad hoc 签名，未经过 Apple 公证。请根据具体提示参照 [Apple 的应用打开说明](https://support.apple.com/en-us/102445)。 |
+| 找不到 **Run workflow** | 将发布工作流推送到仓库默认分支，并确认 Actions 权限。参见 [GitHub Releases](#github-releases)。 |
+| 发布任务拒绝标签，或上次失败留下草稿 | 使用与所选应用版本一致的标签。已有标签时，所选提交必须与其一致。重试同一标签前先删除失败草稿，或改用新的版本后缀；已发布版本不会被覆盖。 |
 
 ### 诊断报告
 
