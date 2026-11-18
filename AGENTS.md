@@ -34,6 +34,7 @@ These notes apply to this repository. Keep operational constraints and regressio
 - Keep source execution, Apple credential handling, and release write access in separate jobs. Import Apple keys only into the disposable signing job and remove its temporary keychain and key files, including on failure.
 - Release archives must contain both architectures and match the selected source's bundle version. Verify checksums and metadata after artifact transfer. Refuse existing releases and conflicting tags; assemble attachments in a draft before publishing.
 - Changes to release helpers require their isolated Python tests and workflow syntax checks. These tests use fake API responses and disposable archives. On macOS they also compile and ad hoc sign disposable Mach-O fixtures to check architecture validation; never launch these fixtures. Tests must not publish releases, access signing credentials, or modify the installed app.
+- Signing regression checks must match `build-app.sh`'s own failure diagnostics. Apple's `codesign` error wording differs between macOS versions; macOS 15 can omit the requested identity from its missing-keychain error. Preserve the native exit code and verify the previous bundle remains intact.
 
 The normal checks are documented in the README. In a restricted development environment, keep compiler and SwiftPM caches inside the repository:
 

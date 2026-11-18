@@ -62,12 +62,19 @@ if [ "$identity" = - ]; then
 elif [[ "$identity" == "Developer ID Application:"* ]]; then
     sign_options+=(--timestamp)
 fi
-/usr/bin/codesign "${sign_options[@]}" "$STAGED_APP_PATH"
+sign_staged_app() {
+    /usr/bin/codesign "$@" "$STAGED_APP_PATH" || {
+        local signing_status=$?
+        echo "Signing failed for identity: $identity" >&2
+        return "$signing_status"
+    }
+}
+sign_staged_app "${sign_options[@]}"
 # codesign normally timestamps Developer ID automatically. Also cover identities
 # selected by fingerprint and require a secure timestamp for distribution.
 signature="$(/usr/bin/codesign -dvvv "$STAGED_APP_PATH" 2>&1)"
 if [[ "$identity" != "Developer ID Application:"* && "$signature" == *"Authority=Developer ID Application:"* && "$signature" != *"Timestamp="* ]]; then
-    /usr/bin/codesign "${sign_options[@]}" --timestamp "$STAGED_APP_PATH"
+    sign_staged_app "${sign_options[@]}" --timestamp
 fi
 /usr/bin/codesign --verify --strict --all-architectures "$STAGED_APP_PATH"
 

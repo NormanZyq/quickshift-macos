@@ -48,7 +48,8 @@ previous="$(hash_executable)"
 expect_rejection 'Update would change'
 [ "$(hash_executable)" = "$previous" ]
 missing_identity="QuickShift Missing Test Certificate $$"
-SIGNING_IDENTITY="$missing_identity" expect_rejection "$missing_identity"
+# Match the build's diagnostic, not codesign's version-dependent keychain wording.
+SIGNING_IDENTITY="$missing_identity" expect_rejection "Signing failed for identity: $missing_identity"
 [ "$(hash_executable)" = "$previous" ]
 
 # The process guard must still apply during an explicit migration. Use a sleeping
