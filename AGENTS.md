@@ -48,6 +48,7 @@ python3 scripts/test-watchdog.py
 ```
 
 - Automated input tests construct events in memory; watchdog tests run child processes. These checks must not install a global filter or post input.
+- Verify pending-action deadline selection with fixed timestamps in `pending-tail-advances`. Keep the armed tests for actual stalled workers and pending work, including `main-stall` and `busy-main-stall`.
 - For cross-process checks, use `Tests/Fixtures/WindowProbe.swift` and the `--test-target-pid` mode. Reject invalid targets rather than falling back to a global filter.
 - Scoped mouse events must continue to reach the probe after each move, so the pointer must follow its new position. This differs from global mode, where the pointer can stay anywhere.
 - Do not assume automation-generated input reaches a session-level event tap. Confirm action/event counters and use physical input when necessary.

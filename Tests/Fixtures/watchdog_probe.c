@@ -38,6 +38,25 @@ static void on_worker(QSDNativeInput *input, void (^work)(void)) {
     CFRunLoopWakeUp(input->workerLoop);
 }
 
+static bool pending_tail_advances(QSDNativeInput *input) {
+    /* Test deadline selection without depending on host scheduling. The stall
+       modes run the armed watchdog separately and check its actual exits. */
+    const uint64_t first_queued = 1;
+    const uint64_t second_queued = first_queued + QSD_MAIN_BUDGET_NS / 2;
+    const uint64_t first_deadline = first_queued + QSD_MAIN_BUDGET_NS;
+    const uint64_t second_deadline = second_queued + QSD_MAIN_BUDGET_NS;
+    if (!qsd_enqueue(input, 0) || !qsd_enqueue(input, 1)) return false;
+    atomic_store(&input->queuedAt[0], first_queued);
+    atomic_store(&input->queuedAt[1], second_queued);
+
+    if (qsd_main_deadline(input, second_queued) != first_deadline) return false;
+    QSDNativeAction action;
+    if (!QSDNativeInputReadAction(input, &action) || action.direction != 0) return false;
+    if (qsd_main_deadline(input, first_deadline) != second_deadline) return false;
+    if (!QSDNativeInputReadAction(input, &action) || action.direction != 1) return false;
+    return qsd_main_deadline(input, second_deadline) == UINT64_MAX && QSDNativeInputFault(input) == 0;
+}
+
 static double cpu_seconds(void) {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
@@ -80,6 +99,11 @@ int main(int argc, char **argv) {
     QSDNativeInputConfigure(input, (QSDNativeConfiguration){
         .left = {.code = 0, .modifiers = 13}, .right = {.code = 1, .modifiers = 13}, .foregroundPID = getpid(), .enabled = true
     });
+    if (strcmp(mode, "pending-tail-advances") == 0) {
+        bool passed = pending_tail_advances(input);
+        QSDNativeInputDestroy(input);
+        return passed ? 0 : 69;
+    }
     bool routeEvents = strcmp(mode, "callback-stall") == 0 || strcmp(mode, "healthy") == 0;
     CGEventRef ordinary = routeEvents
         ? CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, CGPointZero, kCGMouseButtonLeft) : NULL;
@@ -121,16 +145,6 @@ int main(int argc, char **argv) {
             on_worker(input, ^{});
             usleep(1000);
         }
-    } else if (strcmp(mode, "pending-tail-advances") == 0) {
-        on_worker(input, ^{ qsd_enqueue(input, 0); });
-        usleep(320000);
-        on_worker(input, ^{ qsd_enqueue(input, 1); });
-        usleep(50000);
-        QSDNativeAction action;
-        if (!QSDNativeInputReadAction(input, &action) || action.direction != 0) return 69;
-        usleep(220000);
-        if (!QSDNativeInputReadAction(input, &action) || action.direction != 1) return 69;
-        usleep(320000);
     } else if (strcmp(mode, "idle-main-pause") == 0) {
         sleep(1);
     } else if (strcmp(mode, "main-resumes-with-work") == 0) {

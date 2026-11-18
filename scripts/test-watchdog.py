@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix="quickshift-watchdog-") as folder:
         process = subprocess.run([str(binary), mode, str(status_path)], timeout=3, check=False)
         elapsed = time.monotonic() - started
         status = json.loads(subprocess.check_output([str(binary), "status", str(status_path)]))
-        assert process.returncode == expected_code, (mode, process.returncode, expected_code)
+        assert process.returncode == expected_code, (mode, process.returncode, expected_code, round(elapsed, 4), status)
         assert status["fault"] == expected_fault, (mode, status)
         assert elapsed < maximum_seconds, (mode, elapsed, maximum_seconds)
         results.append({"mode": mode, "exitCode": process.returncode, "seconds": round(elapsed, 4), **status})
