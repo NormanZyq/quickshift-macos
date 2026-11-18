@@ -153,8 +153,11 @@ final class GlobalShortcutMonitor: @unchecked Sendable {
         state.owner = owner
         publishConfiguration()
         let source = DispatchSource.makeReadSource(fileDescriptor: QSDNativeInputSignalFD(native), queue: .main)
-        source.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.deliverActions() }
+        // Keep the callback Sendable and bind a strong immutable reference before
+        // entering MainActor; Swift 6.1 cannot infer this from the weak capture alone.
+        source.setEventHandler { @Sendable [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.deliverActions() }
         }
         // The descriptor is closed only after libdispatch finishes cancelling its source.
         source.setCancelHandler { owner.destroy() }
