@@ -62,6 +62,30 @@ import Testing
     #expect(scroll.documentVisibleRect.contains(footer.convert(footer.bounds, to: document)))
 }
 
+@Test @MainActor func animationCheckboxPersistsAcrossRelaunch() throws {
+    _ = NSApplication.shared
+    let domain = "QuickShift-animation-\(UUID())"
+    let defaults = try #require(UserDefaults(suiteName: domain))
+    defer { defaults.removePersistentDomain(forName: domain) }
+    let store = SettingsStore(defaults: defaults)
+    let controller = SettingsWindowController(store: store)
+    let content = try #require(controller.window?.contentView)
+    func animationButton(in view: NSView) -> NSButton? {
+        if let button = view as? NSButton, button.title == "移屏动画" { return button }
+        for child in view.subviews {
+            if let button = animationButton(in: child) { return button }
+        }
+        return nil
+    }
+    let button = try #require(animationButton(in: content))
+    #expect(button.state == .off)
+    button.performClick(nil)
+    #expect(SettingsStore(defaults: defaults).preferences.animatesWindowMoves)
+    #expect(!store.preferences.isEnabled)
+    button.performClick(nil)
+    #expect(!SettingsStore(defaults: defaults).preferences.animatesWindowMoves)
+}
+
 @Test @MainActor func temporaryStartupSuspensionDoesNotDisableTheSavedPreference() throws {
     let domain = "QuickShift-startup-\(UUID())"
     let defaults = try #require(UserDefaults(suiteName: domain))

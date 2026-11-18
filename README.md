@@ -82,6 +82,8 @@ Each direction needs a different shortcut. Modifier matching is exact: an extra 
 
 Turn **Wraparound** (`循环切换显示器`) off to stop at either edge. Preferences are saved automatically. With Accessibility permission granted, an enabled shortcut switch resumes listening on the next normal launch; a disabled switch stays disabled. Closing the settings window keeps QuickShift running in the menu bar; use its **Quit** command to exit.
 
+Enable **Animate window moves** (`移屏动画`) to see the window glide to the next display. This option is off by default. QuickShift uses instant moves when macOS Reduce Motion is on or when processing shortcuts queued during a move.
+
 ### Launch at login
 
 Enable **Launch at Login** (`登录时启动`) in settings to open QuickShift when you sign in to macOS. Disable it to remove the login item. This option is off by default and is independent of the global shortcuts switch.

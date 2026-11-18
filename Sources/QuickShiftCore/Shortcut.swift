@@ -84,17 +84,29 @@ public struct AppPreferences: Codable, Equatable, Sendable {
     public var right: Shortcut
     public var wrapsDisplays: Bool
     public var isEnabled: Bool
+    public var animatesWindowMoves: Bool
 
     public init(
         left: Shortcut = Shortcut(modifiers: [.control, .command, .shift], trigger: .mouse(button: 0)),
         right: Shortcut = Shortcut(modifiers: [.control, .command, .shift], trigger: .mouse(button: 1)),
         wrapsDisplays: Bool = true,
-        isEnabled: Bool = true
+        isEnabled: Bool = true,
+        animatesWindowMoves: Bool = false
     ) {
         self.left = left
         self.right = right
         self.wrapsDisplays = wrapsDisplays
         self.isEnabled = isEnabled
+        self.animatesWindowMoves = animatesWindowMoves
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(left: try values.decode(Shortcut.self, forKey: .left),
+                  right: try values.decode(Shortcut.self, forKey: .right),
+                  wrapsDisplays: try values.decode(Bool.self, forKey: .wrapsDisplays),
+                  isEnabled: try values.decode(Bool.self, forKey: .isEnabled),
+                  animatesWindowMoves: try values.decodeIfPresent(Bool.self, forKey: .animatesWindowMoves) ?? false)
     }
 
     public var isValid: Bool { left.isValid && right.isValid && !left.conflicts(with: right) }

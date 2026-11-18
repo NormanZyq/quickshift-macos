@@ -13,11 +13,22 @@ import Testing
 }
 
 @Test func preferencesRoundTripWithoutLosingCustomShortcuts() throws {
-    var preferences = AppPreferences(wrapsDisplays: false, isEnabled: false)
+    var preferences = AppPreferences(wrapsDisplays: false, isEnabled: false, animatesWindowMoves: true)
     preferences.left = Shortcut(modifiers: [.control, .option], trigger: .key(code: 123, label: "←"))
     let restored = try JSONDecoder().decode(AppPreferences.self, from: JSONEncoder().encode(preferences))
     #expect(restored == preferences)
     #expect(restored.isValid)
+}
+
+@Test func preAnimationPreferencesKeepTheirBindingsAndEnablement() throws {
+    let original = AppPreferences(left: Shortcut(modifiers: .option, trigger: .key(code: 123, label: "←")),
+                                  right: Shortcut(modifiers: .control, trigger: .mouse(button: 4)),
+                                  wrapsDisplays: false, isEnabled: true)
+    var legacy = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+    legacy.removeValue(forKey: "animatesWindowMoves")
+    let migrated = try JSONDecoder().decode(AppPreferences.self, from: JSONSerialization.data(withJSONObject: legacy))
+    #expect(migrated == original)
+    #expect(!migrated.animatesWindowMoves)
 }
 
 @Test func invalidAndConflictingBindingsAreRejected() {

@@ -220,7 +220,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // Use the PID captured with this action. Refresh geometry because the Dock can change the visible frame.
         let currentDisplays = ScreenSnapshot.current()
-        mover.move(processID: pid, direction: direction, displays: currentDisplays, wraps: store.preferences.wrapsDisplays) { [weak self] result in
+        let animate = store.preferences.animatesWindowMoves && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        mover.move(processID: pid, direction: direction, displays: currentDisplays, wraps: store.preferences.wrapsDisplays,
+                   animate: animate) { [weak self] result in
             if case let .failure(error) = result { self?.notice.show(error.localizedDescription) }
         }
     }

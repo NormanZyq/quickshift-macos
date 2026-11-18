@@ -25,41 +25,55 @@ enum MoveFailure: LocalizedError, Sendable {
 
 /// AX IPC can block on another app. Keep it off the event tap's main run loop.
 final class WindowMover: Sendable {
-    typealias OwnMove = @MainActor @Sendable (MoveDirection, [DisplayInfo], Bool) -> Result<MoveReceipt, MoveFailure>
-    typealias ExternalMove = @Sendable (pid_t, MoveDirection, [DisplayInfo], Bool) -> Result<MoveReceipt, MoveFailure>
+    typealias Completion = @MainActor @Sendable (Result<MoveReceipt, MoveFailure>) -> Void
+    typealias OwnMove = @MainActor @Sendable (NSWindow?, MoveDirection, [DisplayInfo], Bool, Bool, @escaping Completion) -> Void
+    typealias ExternalMove = @Sendable (pid_t, MoveDirection, [DisplayInfo], Bool, Bool) -> Result<MoveReceipt, MoveFailure>
     private let queue = DispatchQueue(label: "local.quickshiftdisplay.window-mover", qos: .userInteractive)
     private let ownMove: OwnMove
     private let externalMove: ExternalMove
     private static let responseTimeoutMilliseconds = 600
+    private static let maximumPendingMoves = 4
     @MainActor private var pendingExternalMoves = 0
+    @MainActor private var localMoves: [@MainActor () -> Void] = []
 
     init(ownMove: OwnMove? = nil, externalMove: ExternalMove? = nil) {
-        self.ownMove = ownMove ?? { direction, displays, wraps in
-            LocalWindowMover.move(window: NSApp.keyWindow ?? NSApp.mainWindow,
-                                  direction: direction, displays: displays, wraps: wraps)
-        }
-        self.externalMove = externalMove ?? { processID, direction, displays, wraps in
-            Self.performMove(processID: processID, direction: direction, displays: displays, wraps: wraps)
+        self.ownMove = ownMove ?? LocalWindowMover.move
+        self.externalMove = externalMove ?? { processID, direction, displays, wraps, animate in
+            Self.performMove(processID: processID, direction: direction, displays: displays, wraps: wraps, animate: animate)
         }
     }
 
     @MainActor
     func move(
-        processID: pid_t, direction: MoveDirection, displays: [DisplayInfo], wraps: Bool,
-        completion: @escaping @MainActor @Sendable (Result<MoveReceipt, MoveFailure>) -> Void
+        processID: pid_t, direction: MoveDirection, displays: [DisplayInfo], wraps: Bool, animate: Bool = false,
+        completion: @escaping Completion
     ) {
-        // Self-directed AX calls can execute AppKit directly on the calling thread.
+        let deadline = DispatchTime.now() + .milliseconds(Self.responseTimeoutMilliseconds)
+        // Capture the local window now. A second shortcut needs the first move's
+        // settled geometry, even if the user presses it mid-animation.
         if processID == ProcessInfo.processInfo.processIdentifier {
-            completion(ownMove(direction, displays, wraps))
+            guard localMoves.count < Self.maximumPendingMoves else { completion(.failure(.busy)); return }
+            let window = NSApp?.keyWindow ?? NSApp?.mainWindow
+            let first = localMoves.isEmpty
+            let finish: Completion = { result in
+                completion(result)
+                self.localMoves.removeFirst()
+                self.localMoves.first?()
+            }
+            localMoves.append { [self] in
+                guard DispatchTime.now() < deadline else { finish(.failure(.busy)); return }
+                ownMove(window, direction, displays, wraps, animate && first, finish)
+            }
+            if first { localMoves.first?() }
             return
         }
         // A stalled AX client must not accumulate moves that replay on a later window.
-        guard pendingExternalMoves < 4 else { completion(.failure(.busy)); return }
+        guard pendingExternalMoves < Self.maximumPendingMoves else { completion(.failure(.busy)); return }
+        let animateThisMove = animate && pendingExternalMoves == 0
         pendingExternalMoves += 1
-        let deadline = DispatchTime.now() + .milliseconds(Self.responseTimeoutMilliseconds)
         queue.async {
             let result: Result<MoveReceipt, MoveFailure> = DispatchTime.now() < deadline
-                ? self.externalMove(processID, direction, displays, wraps) : .failure(.busy)
+                ? self.externalMove(processID, direction, displays, wraps, animateThisMove) : .failure(.busy)
             DispatchQueue.main.async {
                 self.pendingExternalMoves -= 1
                 completion(result)
@@ -68,7 +82,7 @@ final class WindowMover: Sendable {
     }
 
     private static func performMove(
-        processID: pid_t, direction: MoveDirection, displays: [DisplayInfo], wraps: Bool
+        processID: pid_t, direction: MoveDirection, displays: [DisplayInfo], wraps: Bool, animate: Bool
     ) -> Result<MoveReceipt, MoveFailure> {
         guard processID != ProcessInfo.processInfo.processIdentifier else { return .failure(.notMovable) }
         guard displays.count > 1 else { return .failure(.singleDisplay) }
@@ -94,7 +108,15 @@ final class WindowMover: Sendable {
         let proposed = DisplayLayout.placement(
             for: frame, from: displays[sourceIndex], to: target, canResize: canResize
         )
+        let animatePosition: ((CGPoint, CGPoint) -> Void)? = animate ? { start, end in
+            // A slow client can skip the intermediate writes and still receive
+            // the final position with the normal AX timeout.
+            AXUIElementSetMessagingTimeout(window, 0.05)
+            defer { AXUIElementSetMessagingTimeout(window, timeout) }
+            WindowMoveAnimation.slide(from: start, to: end) { setPosition(window, $0) == .success }
+        } : nil
         guard placeWindow(from: frame, to: proposed, in: target.visibleFrame, canResize: canResize,
+                          animatePosition: animatePosition,
                           readFrame: { Self.frame(of: window) },
                           setPosition: { setPosition(window, $0) == .success },
                           setSize: { _ = setSize(window, $0) },
@@ -105,11 +127,13 @@ final class WindowMover: Sendable {
 
     static func placeWindow(
         from original: CGRect, to proposed: CGRect, in visibleFrame: CGRect, canResize: Bool,
+        animatePosition: ((CGPoint, CGPoint) -> Void)? = nil,
         readFrame: () -> CGRect?, setPosition: (CGPoint) -> Bool, setSize: (CGSize) -> Void,
         isOnDestination: (CGRect) -> Bool
     ) -> Bool {
         let smaller = CGSize(width: min(original.width, proposed.width), height: min(original.height, proposed.height))
         if canResize && smaller != original.size { setSize(smaller) }
+        animatePosition?(original.origin, proposed.origin)
         guard setPosition(proposed.origin), var actual = readFrame() else { return false }
         if canResize && actual.size != proposed.size {
             setSize(proposed.size)

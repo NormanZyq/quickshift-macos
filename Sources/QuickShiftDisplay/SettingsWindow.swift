@@ -20,6 +20,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let rightButton = NSButton()
     private let enabledCheckbox = NSButton(checkboxWithTitle: "启用全局快捷键", target: nil, action: nil)
     private let wrapCheckbox = NSButton(checkboxWithTitle: "循环切换显示器", target: nil, action: nil)
+    private let animationCheckbox = NSButton(checkboxWithTitle: "移屏动画", target: nil, action: nil)
     private let loginCheckbox = NSButton(checkboxWithTitle: "登录时启动", target: nil, action: nil)
     private let loginDetail = NSTextField(wrappingLabelWithString: "")
     private let loginSettingsButton = NSButton(title: "打开登录项设置…", target: nil, action: nil)
@@ -57,6 +58,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         rightButton.title = preferences.right.title
         enabledCheckbox.state = preferences.isEnabled ? .on : .off
         wrapCheckbox.state = preferences.wrapsDisplays ? .on : .off
+        animationCheckbox.state = preferences.animatesWindowMoves ? .on : .off
     }
 
     func refreshStatus(trusted: Bool, listening: Bool, displays: [DisplayInfo], safelySuspended: Bool = false,
@@ -165,9 +167,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         enabledCheckbox.action = #selector(toggleEnabled)
         wrapCheckbox.target = self
         wrapCheckbox.action = #selector(toggleWrap)
+        animationCheckbox.target = self
+        animationCheckbox.action = #selector(toggleAnimation)
+        animationCheckbox.toolTip = "让窗口平滑移到目标显示器。系统开启“减少动态效果”时会即时移屏。"
         let behaviorGroup = card([
             enabledCheckbox, wrapCheckbox,
             wrappingLabel("开启循环：最左侧再向左会移到最右侧；关闭后在屏幕边缘停止。"),
+            animationCheckbox,
         ])
 
         loginCheckbox.target = self
@@ -274,6 +280,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func toggleEnabled() { store.update { $0.isEnabled = enabledCheckbox.state == .on } }
     @objc private func toggleWrap() { store.update { $0.wrapsDisplays = wrapCheckbox.state == .on } }
+    @objc private func toggleAnimation() { store.update { $0.animatesWindowMoves = animationCheckbox.state == .on } }
     @objc private func toggleLoginItem() { onSetLoginItemEnabled?(loginCheckbox.state == .on) }
     @objc private func openLoginItemSettings() { onRequestLoginItemSettings?() }
     @objc private func resetShortcuts() { store.resetShortcuts() }
