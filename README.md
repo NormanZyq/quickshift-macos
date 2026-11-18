@@ -24,6 +24,10 @@
 <p align="center">A native macOS menu bar utility for moving the active window between displays.</p>
 
 <p align="center">
+  <img src="docs/demo.gif" alt="Control + Command + Shift with left click moves the window left; right click moves it back to the middle, then to the right" width="720">
+</p>
+
+<p align="center">
   <a href="#for-users">For users</a> · <a href="#for-developers">For developers</a> · <a href="#troubleshooting">Troubleshooting</a>
 </p>
 

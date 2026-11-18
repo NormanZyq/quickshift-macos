@@ -24,6 +24,10 @@
 <p align="center">原生 macOS 菜单栏工具，用快捷键将当前活动窗口移动到另一台显示器。</p>
 
 <p align="center">
+  <img src="docs/demo.zh-CN.gif" alt="Control + Command + Shift 加鼠标左键将窗口移到左侧显示器；加右键移回中间，再按一次移到右侧" width="720">
+</p>
+
+<p align="center">
   <a href="#用户指南">用户指南</a> · <a href="#开发者指南">开发者指南</a> · <a href="#故障排查">故障排查</a>
 </p>
 

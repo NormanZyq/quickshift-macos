@@ -7,7 +7,9 @@ These notes apply to this repository. Keep operational constraints and regressio
 - `README.md` is the default English entry point; `README.zh-CN.md` is its Chinese counterpart. Keep capabilities, commands, limitations, and links aligned.
 - Both READMEs use the `HEADER_ICON`, `TOOL_PHILOSOPHY`, and `SHORTCUT_PHILOSOPHY` header slots. Keep the shared icon and the user-provided introduction and shortcut rationale aligned across languages. The README icon is `Resources/AppIcon.png`; regenerate it together with `Resources/AppIcon.icns` using `scripts/make-icon.swift`. Use `--preview-dir .build/icon-review` to inspect the exported sizes. Keep visual review artifacts in `.build/`.
 - Keep public documentation focused on installation, observable behavior, configuration, development commands, and actionable troubleshooting. Do not include session state, debugging chronology, experiment results, or claims inferred only from unit tests.
-- Documentation-only changes need link, structure, and command-path checks; they do not require rebuilding or reauthorizing the running app.
+- Documentation-only changes need link
+- The README demo GIFs are `docs/demo.gif` (English) and `docs/demo.zh-CN.gif`. Regenerate them from `scripts/make-demo.swift` (`<out-dir> [zh|en]`, then ffmpeg); keep both languages in sync.
+, structure, and command-path checks; they do not require rebuilding or reauthorizing the running app.
 
 ## Input engine constraints
 
