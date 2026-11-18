@@ -91,6 +91,25 @@ class ReleaseTests(unittest.TestCase):
         target = self.bundle()
         self.assertEqual(release.verify_release_files(target, SHA, TAG, "ad-hoc"), self.metadata)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Requires the macOS compiler and signing tools")
+    def test_real_universal_app_is_accepted_and_thin_app_is_rejected(self):
+        app = self.root / "QuickShift.app"
+        executable = app / "Contents/MacOS/QuickShiftDisplay"
+        executable.parent.mkdir(parents=True)
+        (app / "Contents/Info.plist").write_bytes(plistlib.dumps({**INFO, "CFBundlePackageType": "APPL"}))
+        source = self.root / "fixture.c"
+        source.write_text("int main(void) { return 0; }\n")
+        # Compile and sign a disposable fixture; never launch an app or use a certificate.
+        release.run(["/usr/bin/xcrun", "clang", "-arch", "arm64", "-arch", "x86_64",
+                     "-mmacosx-version-min=13.0", source, "-o", executable])
+        release.run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", app])
+        release.validate_macos_app(app, self.metadata)
+        thin = self.root / "thin-executable"
+        release.run(["/usr/bin/lipo", executable, "-thin", "arm64", "-output", thin])
+        thin.replace(executable)
+        with self.assertRaisesRegex(RuntimeError, "lipo failed"):
+            release.validate_macos_app(app, self.metadata)
+
     def test_package_tampering_is_rejected(self):
         target = self.bundle()
         (target / release.NOTES).write_text("changed")

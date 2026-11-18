@@ -170,7 +170,7 @@ def check_zip(path):
 def validate_macos_app(app, metadata):
     if bundle_info(app) != {key: metadata[key] for key in ("app_version", "bundle_version", "minimum_macos")}:
         raise ValueError("Built bundle version differs from selected source")
-    run(["/usr/bin/lipo", "-verify_arch", *ARCHITECTURES, app / "Contents/MacOS/QuickShiftDisplay"])
+    run(["/usr/bin/lipo", app / "Contents/MacOS/QuickShiftDisplay", "-verify_arch", *ARCHITECTURES])
     run(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", app])
 
 
