@@ -1,22 +1,31 @@
 <!-- HEADER_ICON_START -->
-
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="QuickShift app icon" width="160" height="160">
+</p>
 <!-- HEADER_ICON_END -->
 
-# QuickShift
+<h1 align="center">QuickShift</h1>
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
 <!-- TOOL_PHILOSOPHY_START -->
-
+<p align="center"><strong>Move windows between displays with ease.</strong></p>
 <!-- TOOL_PHILOSOPHY_END -->
 
 <!-- SHORTCUT_PHILOSOPHY_START -->
-
+<p align="center">
+  Default: <strong>Control + Command + Shift + left/right click</strong><br>
+  Intuitive, efficient, and unlikely to conflict with system or app shortcuts.
+</p>
 <!-- SHORTCUT_PHILOSOPHY_END -->
 
-A native macOS menu bar utility for moving the active window between displays.
+<p align="center">A native macOS menu bar utility for moving the active window between displays.</p>
 
-[For users](#for-users) · [For developers](#for-developers) · [Troubleshooting](#troubleshooting)
+<p align="center">
+  <a href="#for-users">For users</a> · <a href="#for-developers">For developers</a> · <a href="#troubleshooting">Troubleshooting</a>
+</p>
 
 ## For users
 

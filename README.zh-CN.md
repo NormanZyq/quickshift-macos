@@ -1,22 +1,31 @@
 <!-- HEADER_ICON_START -->
-
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="QuickShift 应用图标" width="160" height="160">
+</p>
 <!-- HEADER_ICON_END -->
 
-# QuickShift
+<h1 align="center">QuickShift</h1>
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
 <!-- TOOL_PHILOSOPHY_START -->
-
+<p align="center"><strong>让跨屏幕挪动窗口不再成为负担。</strong></p>
 <!-- TOOL_PHILOSOPHY_END -->
 
 <!-- SHORTCUT_PHILOSOPHY_START -->
-
+<p align="center">
+  默认 <strong>Control + Command + Shift + 鼠标左／右键</strong><br>
+  不易与系统或其他应用的快捷键冲突，直观、顺手、高效。
+</p>
 <!-- SHORTCUT_PHILOSOPHY_END -->
 
-原生 macOS 菜单栏工具，用快捷键将当前活动窗口移动到另一台显示器。
+<p align="center">原生 macOS 菜单栏工具，用快捷键将当前活动窗口移动到另一台显示器。</p>
 
-[用户指南](#用户指南) · [开发者指南](#开发者指南) · [故障排查](#故障排查)
+<p align="center">
+  <a href="#用户指南">用户指南</a> · <a href="#开发者指南">开发者指南</a> · <a href="#故障排查">故障排查</a>
+</p>
 
 ## 用户指南
 
