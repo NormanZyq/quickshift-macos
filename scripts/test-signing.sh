@@ -6,7 +6,10 @@ scratch="$(mktemp -d "${TMPDIR:-/tmp}/quickshift-signing.XXXXXX")"
 scratch="$(cd -P "$scratch" && pwd)"
 fixture_pid=
 cleanup() {
-    if [ -n "$fixture_pid" ]; then kill "$fixture_pid" 2>/dev/null || true; fi
+    if [ -n "$fixture_pid" ]; then
+        kill "$fixture_pid" 2>/dev/null || true
+        wait "$fixture_pid" 2>/dev/null || true
+    fi
     rm -rf "$scratch"
 }
 trap cleanup EXIT
@@ -23,6 +26,7 @@ expect_rejection() {
     local message="$1"
     if bash scripts/build-app.sh >"$log" 2>&1; then
         echo "Expected build to refuse: $message" >&2
+        cat "$log" >&2
         return 1
     fi
     grep -Fq "$message" "$log" || { cat "$log" >&2; return 1; }
@@ -52,13 +56,35 @@ missing_identity="QuickShift Missing Test Certificate $$"
 SIGNING_IDENTITY="$missing_identity" expect_rejection "Signing failed for identity: $missing_identity"
 [ "$(hash_executable)" = "$previous" ]
 
-# The process guard must still apply during an explicit migration. Use a sleeping
-# fixture at the executable path so the test never starts QuickShift or requests AX.
-cp /bin/sleep "$scratch/SleepFixture"
-mv "$scratch/SleepFixture" "$bundle/Contents/MacOS/QuickShiftDisplay"
+# Exercise the process guard with a runnable fixture. A copied and re-signed
+# system binary can be killed by macOS before the guard has a process to detect.
+cat > "$scratch/running-app.c" <<'C'
+#include <stdio.h>
+#include <unistd.h>
+
+int main(void) {
+    if (puts("ready") == EOF || fflush(stdout) == EOF) return 1;
+    sleep(120);
+    return 0;
+}
+C
+/usr/bin/xcrun clang "$scratch/running-app.c" -o "$scratch/running-app"
+executable="$bundle/Contents/MacOS/QuickShiftDisplay"
+mv "$scratch/running-app" "$executable"
 /usr/bin/codesign --force --options runtime --timestamp=none --sign - "$bundle"
-"$bundle/Contents/MacOS/QuickShiftDisplay" 120 &
+fixture_log="$scratch/running-app.log"
+: >"$fixture_log"
+"$executable" >"$fixture_log" 2>&1 &
 fixture_pid=$!
+deadline=$((SECONDS + 5))
+until grep -Fxq ready "$fixture_log"; do
+    if ! kill -0 "$fixture_pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+        echo "The signed running-app fixture did not start." >&2
+        cat "$fixture_log" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
 export QUICKSHIFT_ALLOW_IDENTITY_CHANGE=1
 expect_rejection 'QuickShift is running'
 kill "$fixture_pid"
